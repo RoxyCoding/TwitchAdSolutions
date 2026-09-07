@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (video-swap-new)
-// @namespace    https://github.com/ryanbr/TwitchAdSolutions
+// @namespace    https://github.com/RoxyCoding/TwitchAdSolutions
 // @version      1.87
-// @updateURL    https://github.com/ryanbr/TwitchAdSolutions/raw/master/video-swap-new/video-swap-new.user.js
-// @downloadURL  https://github.com/ryanbr/TwitchAdSolutions/raw/master/video-swap-new/video-swap-new.user.js
+// @updateURL    https://github.com/RoxyCoding/TwitchAdSolutions/raw/main/video-swap-new/video-swap-new.user.js
+// @downloadURL  https://github.com/RoxyCoding/TwitchAdSolutions/raw/main/video-swap-new/video-swap-new.user.js
 // @description  Multiple solutions for blocking Twitch ads (video-swap-new)
-// @author       pixeltris (original), ryanbr (fork)
+// @author       pixeltris (original), ryanbr, RoxyCoding (fork)
 // @match        *://*.twitch.tv/*
 // @run-at       document-start
 // @grant        none

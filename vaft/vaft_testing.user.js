@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft-testing)
-// @namespace    https://github.com/ryanbr/TwitchAdSolutions
+// @namespace    https://github.com/RoxyCoding/TwitchAdSolutions
 // @version      678.0.0
 // @description  Multiple solutions for blocking Twitch ads (vaft testing variant)
-// @updateURL    https://github.com/ryanbr/TwitchAdSolutions/raw/master/vaft/vaft_testing.user.js
-// @downloadURL  https://github.com/ryanbr/TwitchAdSolutions/raw/master/vaft/vaft_testing.user.js
-// @author       https://github.com/cleanlock/VideoAdBlockForTwitch#credits
+// @updateURL    https://github.com/RoxyCoding/TwitchAdSolutions/raw/main/vaft/vaft_testing.user.js
+// @downloadURL  https://github.com/RoxyCoding/TwitchAdSolutions/raw/main/vaft/vaft_testing.user.js
+// @author       cleanlock (https://github.com/cleanlock/VideoAdBlockForTwitch#credits), ryanbr, RoxyCoding (fork)
 // @match        *://*.twitch.tv/*
 // @run-at       document-start
 // @grant        none
