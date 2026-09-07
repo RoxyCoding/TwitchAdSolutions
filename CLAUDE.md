@@ -41,6 +41,7 @@ All read at init, injected into worker blob:
 - `twitchAdSolutions_playerType` — string, default `popout`
 - `twitchAdSolutions_pinBackupPlayerType` — `true`/`false`, default `false` (vaft default `true`)
 - `twitchAdSolutions_hideAdOverlay` — `true` to hide the internal `.tas-adblock-overlay` banner (SDA wrapper hide always runs), default not set
+- `twitchAdSolutions_autoUnmute` — `false` to disable auto-unmute, default on (vaft). Clears Twitch-set mutes (page load / autoplay policy, post-ad, silent re-mute) on the buffer-monitor tick, syncing `video.muted` and the `[data-a-target="player-mute-unmute-button"]` DOM button. Stands down when `video-muted` localStorage is `{"default":true}` — a deliberate user mute is never overridden.
 - `twitchAdSolutions_reloadCooldownSeconds` — number, default `30` (0 to disable)
 - `twitchAdSolutions_disableReloadCap` — `true` to revert to unlimited reloads
 - `twitchAdSolutions_driftCorrectionRate` — number, default `1.1` (0 to disable)
@@ -92,6 +93,22 @@ Testing files include experimental features (ad completion spoofing, lower thres
 
 - **vaft**: `embed`, `site`, `popout`, `mobile_web` (autoplay removed — gets stuck in loading circle on transition back)
 - **video-swap-new**: `embed`, `popout`, `mobile_web` (autoplay + picture-by-picture removed)
+
+## Auto-Unmute
+
+`autoUnmutePlayer()` runs on the same buffer-monitor tick as the overlay hide. It clears mutes Twitch sets itself and
+never overrides the user:
+- **User intent** is read from Twitch's own `video-muted` localStorage key (`{"default":true}` when muted via the UI) —
+  the same signal the post-reload restore in `doTwitchPlayerTask` trusts. When set, the function returns immediately.
+- **Both layers are synced** — `video.muted` (the media element) and the DOM button (Twitch's React state), because
+  they diverge: fixing only the element can leave the UI stuck on "unmute" and be re-asserted on the next render.
+- **The mute state is sampled before it is cleared.** Twitch does not expose `aria-pressed` on this button, so the
+  fallback uses the entry-time element state. Reading it after the fix would always see `false` and the click would
+  never fire; conversely, clicking an already-unmuted button would *mute* the stream, so the click is gated on the
+  player actually having been muted on entry.
+- Matched via `data-a-target` only — the class names in Twitch's markup are generated, and `aria-label` is localized.
+
+Disable with `twitchAdSolutions_autoUnmute='false'`.
 
 ## Ad Overlay Hiding
 

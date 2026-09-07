@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v68.5.9 (2026-09-08) — RoxyCoding fork
+
+### Added
+- **Auto-unmute for Twitch-set mutes** — Twitch mutes the player on its own in several situations (page load under the browser's autoplay policy, after an ad break, and the silent re-mute pattern behind #200), leaving the stream silent until the user clicks unmute. `autoUnmutePlayer()` now runs on the buffer-monitor tick and clears those. It syncs **both** layers, which can diverge: `video.muted` on the media element and the DOM mute button carrying Twitch's React state — fixing only the element can leave the UI stuck showing "unmute" and be re-asserted on the next render. A deliberate user mute is never overridden: the function stands down when Twitch's own `video-muted` localStorage key reads `{"default":true}`, the same user-intent signal the post-reload restore already trusts, so the m key and the mute button keep working normally. The button is matched by `data-a-target` alone (class names are generated, `aria-label` is localized), and because Twitch exposes no `aria-pressed` on it, the click is gated on mute state sampled *before* the element fix — clicking an already-unmuted button would mute the stream. Default on; set `twitchAdSolutions_autoUnmute='false'` to disable. Applies to all four vaft variants.
+
 ## v68.5.8 (2026-09-08) — RoxyCoding fork
 
 ### Fixed

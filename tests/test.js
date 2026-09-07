@@ -657,6 +657,75 @@ for (const name of vaftFiles) {
 }
 
 // ============================================================
+// Test: auto-unmute clears Twitch mutes but respects user intent
+// ============================================================
+console.log('--- auto-unmute ---');
+
+function makeMuteButton(attrs) {
+    let clicks = 0;
+    return {
+        _attrs: Object.assign({ 'data-a-target': 'player-mute-unmute-button' }, attrs || {}),
+        getAttribute(k) { return k in this._attrs ? this._attrs[k] : null; },
+        click() { clicks++; },
+        get clicks() { return clicks; }
+    };
+}
+
+// Mirrors autoUnmutePlayer()'s decision logic.
+function autoUnmute(opts) {
+    const video = opts.hasVideo === false ? null : { muted: opts.videoMuted };
+    const btn = makeMuteButton(opts.btnAttrs);
+    const mutedLS = opts.ls;
+    if (mutedLS && mutedLS.indexOf('"default":true') !== -1) {
+        return { video: video, btn: btn, stoodDown: true };
+    }
+    const wasMuted = !!(video && video.muted);
+    if (wasMuted) { video.muted = false; }
+    const pressed = btn.getAttribute('aria-pressed');
+    const uiMuted = pressed !== null ? pressed === 'true' : wasMuted;
+    if (uiMuted) { btn.click(); }
+    return { video: video, btn: btn, stoodDown: false };
+}
+
+const auLoad = autoUnmute({ videoMuted: true, ls: null });
+assertEq(auLoad.video.muted, false, 'auto-unmute clears a Twitch page-load mute');
+assertEq(auLoad.btn.clicks, 1, 'auto-unmute also syncs the DOM mute button');
+
+const auPostAd = autoUnmute({ videoMuted: true, ls: '{"default":false}' });
+assertEq(auPostAd.video.muted, false, 'auto-unmute clears a post-ad re-mute');
+
+const auUser = autoUnmute({ videoMuted: true, ls: '{"default":true}' });
+assert(auUser.stoodDown, 'auto-unmute stands down when the user muted deliberately');
+assertEq(auUser.video.muted, true, 'a deliberate user mute is preserved');
+assertEq(auUser.btn.clicks, 0, 'no button click against user intent');
+
+// The critical safety property: clicking an already-unmuted button would MUTE the stream.
+const auSteady = autoUnmute({ videoMuted: false, ls: null });
+assertEq(auSteady.btn.clicks, 0, 'never clicks the button when already unmuted (would mute!)');
+assertEq(auSteady.video.muted, false, 'steady state stays unmuted');
+
+// aria-pressed is honoured when Twitch does expose it.
+assertEq(autoUnmute({ videoMuted: true, ls: null, btnAttrs: { 'aria-pressed': 'true' } }).btn.clicks, 1,
+    'aria-pressed=true drives the click');
+assertEq(autoUnmute({ videoMuted: false, ls: null, btnAttrs: { 'aria-pressed': 'false' } }).btn.clicks, 0,
+    'aria-pressed=false suppresses the click');
+
+// No player yet (early tick) must be a no-op, not a throw.
+assertEq(autoUnmute({ videoMuted: false, ls: null, hasVideo: false }).btn.clicks, 0,
+    'no-op when no video element is present yet');
+
+// The shipped sources must keep the user-intent check and the pre-sampled state.
+for (const name of vaftFiles) {
+    const src = fs.readFileSync(path.join(vaftDir, name), 'utf8');
+    const fnIdx = src.indexOf('function autoUnmutePlayer()');
+    assert(fnIdx !== -1, name + ' defines autoUnmutePlayer');
+    const body = src.slice(fnIdx, fnIdx + 3000);
+    assert(body.indexOf('"default":true') !== -1, name + ' honours the video-muted user-intent key');
+    assert(body.indexOf('const wasMuted') !== -1, name + ' samples mute state before clearing it');
+    assert(body.indexOf('player-mute-unmute-button') !== -1, name + ' targets the mute button by data-a-target');
+}
+
+// ============================================================
 // Results
 // ============================================================
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

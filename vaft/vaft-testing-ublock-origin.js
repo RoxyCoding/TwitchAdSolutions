@@ -80,6 +80,7 @@ twitch-videoad.js text/javascript
         scope.FastAutoplayFirstTry = true;// Prepend autoplay when prior break exhausted Source-tier. Default on as of v638. Opt-out: twitchAdSolutions_fastAutoplayFirstTry=false.
         scope.BackupSwapFirst = true;// On ad detect, immediately swap to a backup player-type m3u8 (TTV-AB-style). Avoids MediaSource mixing from strip activity — fewer loading circles in field. Cost: extra fetches on every ad break. Default on; set twitchAdSolutions_backupSwapFirst=false to disable.
         scope.RecoverFromSilentMute = true;// Issue #200: recover from silent Twitch re-mute on hard reload. Default on; set twitchAdSolutions_recoverFromSilentMute=false to disable.
+        scope.AutoUnmute = true;// Continuously clear Twitch's own mutes (page load, post-ad, silent re-mute) on the buffer-monitor tick, syncing both video.muted and the DOM mute button. Never overrides a mute the USER set: localStorage video-muted '{"default":true}' and manual m-key/button presses are respected. Default on; set twitchAdSolutions_autoUnmute=false to disable.
         scope.SoftReloadNoStrip = true;// Issue #129 (mode D): post-ad reload uses SOFT reload when the break stripped no segments (BackupSwapFirst CSAI swap). Hard reload's MediaSource flush is only needed after strip injection (BLANK_MP4/recovery) — on a no-strip break it just pays the desktop black-screen + play-icon teardown for nothing. Default on; set twitchAdSolutions_softReloadNoStrip=false to force the old always-hard behavior.
         scope.DisableInAdGapSeek = false;// In-ad frozen-buffer-gap seek (mirrors TTV-AB #33). Default on. Set twitchAdSolutions_disableInAdGapSeek=true to turn it OFF (for A/B isolation of mid-break pause/loading-circle reports).
         scope.DisableInAdFreezeReload = false;// In-ad frozen-playhead reload escalation — readyState-independent backstop for audio-gap CSAI freezes the gap-seek can't catch (observed ~60s stalls). Default on. Set twitchAdSolutions_disableInAdFreezeReload=true to turn it OFF.
@@ -208,6 +209,8 @@ twitch-videoad.js text/javascript
     // hide type per page load, then stay silent — the hide itself still runs
     // on every tick via dataset-based dedup.
     let loggedSdaHide = false;
+    let loggedAutoUnmute = false;
+    let loggedAutoUnmuteRespect = false;
     // Strings used to detect and handle conflicting Twitch worker overrides (e.g. TwitchNoSub)
     const workerStringConflicts = [
         'twitch',
@@ -2372,6 +2375,8 @@ twitch-videoad.js text/javascript
         // lifecycle and stay visible afterwards. Running here on every monitor tick
         // (1-3s cadence) keeps them hidden without a dedicated interval.
         try { hideTwitchAdOverlays(); } catch {}
+        // Same tick as the overlay hide: clears Twitch's page-load / post-ad / silent re-mutes.
+        autoUnmutePlayer();
         // Visibility-aware backoff: poll 3x slower when tab is hidden (but NOT during PiP — user is still watching).
         // Exception: don't back off during an active ad break — hidden-tab recovery (backup search → reload) is
         // already slowed by browser timer clamping; the 3x backoff compounds the "stuck loading until refocus"
@@ -2382,6 +2387,65 @@ twitch-videoad.js text/javascript
         } finally {
             setTimeout(monitorPlayerBuffering, rescheduleDelay);
         }
+    }
+    // Auto-unmute: clear mutes Twitch sets on its own (page load / autoplay policy, post-ad,
+    // the silent re-mute pattern behind #200) without ever overriding a mute the USER chose.
+    //
+    // User intent is read from Twitch's own `video-muted` localStorage key, which it writes as
+    // '{"default":true}' when the user mutes via the UI (m key or the mute button) — the same
+    // signal the post-reload restore at the bottom of doTwitchPlayerTask already trusts. When
+    // that says the user wants mute, this does nothing at all.
+    //
+    // Both layers are synced, because they can diverge: video.muted is the media element, while
+    // the button reflects Twitch's React state. Unmuting only the element can leave the UI stuck
+    // showing "unmute", and Twitch can re-assert its state over ours on the next render. The
+    // element is set directly (instant, no dependency on the controls being mounted) and the
+    // button is clicked only when it still reports a muted state afterwards.
+    function autoUnmutePlayer() {
+        if (!AutoUnmute) return;
+        try {
+            // Respect a deliberate user mute — same predicate as the post-reload restore path.
+            const mutedLS = localStorage.getItem('video-muted');
+            if (mutedLS && mutedLS.includes('"default":true')) {
+                if (!loggedAutoUnmuteRespect) {
+                    loggedAutoUnmuteRespect = true;
+                    console.log('[AD DEBUG] Auto-unmute standing down — video-muted localStorage says the user muted deliberately');
+                }
+                return;
+            }
+            const video = getPlayerVideoElement();
+            // Sampled BEFORE we clear it: the button fallback below needs to know whether the
+            // player was muted on entry. Reading video.muted after the fix would always see
+            // false and the click would never fire.
+            const wasMuted = !!(video && video.muted);
+            let acted = false;
+            if (wasMuted) {
+                video.muted = false;
+                playerBufferState.vaftEverUnmuted = true;
+                acted = true;
+            }
+            // The button carries Twitch's React state, which can outlive the element fix and be
+            // re-asserted on the next render. data-a-target is stable; the class names in the
+            // markup are generated and must not be matched on.
+            const btn = document.querySelector('[data-a-target="player-mute-unmute-button"]');
+            if (btn) {
+                // aria-label is localized ("ミュート解除" / "Unmute"), so it cannot be text-matched.
+                // Twitch does not put aria-pressed on this button today, so the fallback is what
+                // actually runs: treat the entry-time element state as the UI state. Clicking a
+                // button that is already in the unmuted state would MUTE the stream, so this only
+                // ever fires when the player really was muted on entry.
+                const pressed = btn.getAttribute('aria-pressed');
+                const uiMuted = pressed !== null ? pressed === 'true' : wasMuted;
+                if (uiMuted) {
+                    btn.click();
+                    acted = true;
+                }
+            }
+            if (acted && !loggedAutoUnmute) {
+                loggedAutoUnmute = true;
+                console.log('[AD DEBUG] Auto-unmute cleared a Twitch-set mute (user intent not set in video-muted localStorage)');
+            }
+        } catch {}
     }
     // Hide Twitch's ad break / Turbo promo / stream display ad overlays when we're already blocking ads
     function hideTwitchAdOverlays() {
@@ -3078,6 +3142,11 @@ twitch-videoad.js text/javascript
         if (lsRecoverFromSilentMute === 'false') {
             RecoverFromSilentMute = false;
             console.log('[AD DEBUG] RecoverFromSilentMute disabled via localStorage — hard-reload backstop respects already-muted state');
+        }
+        const lsAutoUnmute = localStorage.getItem('twitchAdSolutions_autoUnmute');
+        if (lsAutoUnmute === 'false') {
+            AutoUnmute = false;
+            console.log('[AD DEBUG] AutoUnmute disabled via localStorage — Twitch mutes (page load, post-ad, silent re-mute) will no longer be cleared automatically');
         }
         const lsSoftReloadNoStrip = localStorage.getItem('twitchAdSolutions_softReloadNoStrip');
         if (lsSoftReloadNoStrip === 'false') {
