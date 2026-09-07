@@ -27,10 +27,10 @@ Alternatively:
 
 **There are better / easier to use methods in the above recommendations.**
 
-- vaft - [userscript](https://github.com/RoxyCoding/TwitchAdSolutions/raw/main/vaft/vaft.user.js) / [ublock](https://raw.githubusercontent.com/RoxyCoding/TwitchAdSolutions/main/vaft/vaft-ublock-origin.js) / [ublock (permalink)](https://raw.githubusercontent.com/RoxyCoding/TwitchAdSolutions/bc008059ee8dc323ebe400596c329fb261e1bd48/vaft/vaft-ublock-origin.js)
+- vaft - [userscript](https://github.com/RoxyCoding/TwitchAdSolutions/raw/main/vaft/vaft.user.js) / [ublock](https://raw.githubusercontent.com/RoxyCoding/TwitchAdSolutions/main/vaft/vaft-ublock-origin.js) / [ublock (permalink)](https://raw.githubusercontent.com/RoxyCoding/TwitchAdSolutions/3ad5c6c77492783fd56c36a4f8e1d69414f950ef/vaft/vaft-ublock-origin.js)
   - Attempts to get a clean stream as fast as it can
   - If it fails to get a clean stream it removes ad segments (no playback until ad-free stream is found)
-- video-swap-new - [userscript](https://github.com/RoxyCoding/TwitchAdSolutions/raw/main/video-swap-new/video-swap-new.user.js) / [ublock](https://raw.githubusercontent.com/RoxyCoding/TwitchAdSolutions/main/video-swap-new/video-swap-new-ublock-origin.js) / [ublock (permalink)](https://raw.githubusercontent.com/RoxyCoding/TwitchAdSolutions/bc008059ee8dc323ebe400596c329fb261e1bd48/video-swap-new/video-swap-new-ublock-origin.js)
+- video-swap-new - [userscript](https://github.com/RoxyCoding/TwitchAdSolutions/raw/main/video-swap-new/video-swap-new.user.js) / [ublock](https://raw.githubusercontent.com/RoxyCoding/TwitchAdSolutions/main/video-swap-new/video-swap-new-ublock-origin.js) / [ublock (permalink)](https://raw.githubusercontent.com/RoxyCoding/TwitchAdSolutions/3ad5c6c77492783fd56c36a4f8e1d69414f950ef/video-swap-new/video-swap-new-ublock-origin.js)
   - Attempts to get a clean stream
   - If it fails to get a clean stream it removes ad segments (no playback until ad-free stream is found)
   - Not recommended, `vaft` is a better script
