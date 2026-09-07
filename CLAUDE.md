@@ -98,7 +98,7 @@ Testing files include experimental features (ad completion spoofing, lower thres
 `hideTwitchAdOverlays()` hides one overlay type during ad blocking:
 - **Stream display ads (SDA)** — via exact `[data-test-selector="sda-wrapper"]` selector, no parent walking
 
-Called on every buffer monitor tick. Guards via `dataset.tasHidden` to skip already-hidden elements.
+Called on every buffer monitor tick, from session start and regardless of ad state — it is deliberately NOT gated on `cachedPlayerRootDiv` (that cache is only populated by `updateAdblockBanner()` during an ad break, which previously left the SDA hide dead until the first break). Guards via `dataset.tasHidden` to skip already-hidden elements.
 
 **Previously removed:**
 - Turbo promo / "allow ads" overlay hide (PR #143) — used `.player-overlay-background` which is Twitch's generic modal scrim (also used for content gates, error dialogs, subscription warnings). Too broad to use safely.

@@ -578,6 +578,85 @@ const attrsEmpty = parseAttributes('');
 assert(typeof attrsEmpty === 'object', 'returns object for empty string');
 
 // ============================================================
+// Test: SDA overlay hide is not gated on the player-root cache
+// ============================================================
+// Regression guard. hideTwitchAdOverlays() used to early-return on cachedPlayerRootDiv,
+// which is only assigned in updateAdblockBanner() during an ad break — so stream display
+// ads stayed visible for the whole pre-break part of a session. SDAs are page-level and
+// their query starts at document, so no player root is needed.
+console.log('--- SDA overlay hide (not player-root gated) ---');
+
+function makeSdaEl() {
+    const styles = {};
+    return {
+        dataset: {},
+        style: {
+            setProperty: (k, v) => { styles[k] = v; },
+            removeProperty: (k) => { delete styles[k]; }
+        },
+        _styles: styles
+    };
+}
+
+// Mirrors the shipped SDA branch of hideTwitchAdOverlays().
+let sdaLogCount = 0;
+function hideSdaOverlays(doc) {
+    const els = doc.querySelectorAll('[data-test-selector="sda-wrapper"]');
+    for (let i = 0; i < els.length; i++) {
+        els[i].style.setProperty('display', 'none', 'important');
+        if (!els[i].dataset.tasHidden) {
+            els[i].dataset.tasHidden = '1';
+            sdaLogCount++;
+        }
+    }
+}
+
+const sdaEl = makeSdaEl();
+const sdaDoc = {
+    querySelectorAll: (sel) => sel === '[data-test-selector="sda-wrapper"]' ? [sdaEl] : []
+};
+
+// No ad break has happened, so no player root exists — the SDA must still be hidden.
+hideSdaOverlays(sdaDoc);
+assertEq(sdaEl._styles.display, 'none', 'SDA hidden on a clean stream (no ad break yet)');
+assertEq(sdaEl.dataset.tasHidden, '1', 'SDA marker is truthy so the dedup actually dedupes');
+assertEq(sdaLogCount, 1, 'SDA hide logged once');
+
+// A React re-render can drop the inline style while keeping the element: the next tick must
+// re-hide it, but must not log again.
+delete sdaEl._styles.display;
+hideSdaOverlays(sdaDoc);
+assertEq(sdaEl._styles.display, 'none', 'SDA re-hidden after a re-render dropped the style');
+assertEq(sdaLogCount, 1, 'repeat ticks do not re-log');
+
+// The shipped sources must not reintroduce the cachedPlayerRootDiv early return.
+const fs = require('fs');
+const path = require('path');
+const vaftDir = path.join(__dirname, '..', 'vaft');
+const vaftFiles = [
+    'vaft.user.js',
+    'vaft-ublock-origin.js',
+    'vaft_testing.user.js',
+    'vaft-testing-ublock-origin.js'
+];
+for (const name of vaftFiles) {
+    const src = fs.readFileSync(path.join(vaftDir, name), 'utf8');
+    const fnIdx = src.indexOf('function hideTwitchAdOverlays()');
+    assert(fnIdx !== -1, name + ' still defines hideTwitchAdOverlays');
+    const sdaIdx = src.indexOf('data-test-selector="sda-wrapper"', fnIdx);
+    assert(sdaIdx !== -1, name + ' still hides the SDA wrapper');
+    // Between the function opening and the SDA query there must be no early return
+    // on the player-root cache.
+    const head = src.slice(fnIdx, sdaIdx);
+    assert(!/if\s*\(!cachedPlayerRootDiv[^)]*\)\s*return;/.test(head),
+        name + ' does not gate the SDA hide on cachedPlayerRootDiv');
+    // The SDA marker must not be the empty string — dataset reads '' back as falsy, so the
+    // dedup would never fire (the tasAdHidden trap fixed in v68.5.6).
+    assert(!/dataset\.tasHidden\s*=\s*''/.test(src),
+        name + ' does not assign a falsy empty-string SDA marker');
+}
+
+// ============================================================
 // Results
 // ============================================================
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

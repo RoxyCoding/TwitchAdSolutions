@@ -2355,13 +2355,25 @@
     }
     // Hide Twitch's ad break / Turbo promo / stream display ad overlays when we're already blocking ads
     function hideTwitchAdOverlays() {
-        if (!cachedPlayerRootDiv || !cachedPlayerRootDiv.isConnected) return;
+        // Deliberately NOT gated on cachedPlayerRootDiv. That cache is only ever assigned in
+        // updateAdblockBanner(), which runs on a worker ad-banner message — so on a clean stream
+        // it stays null and the early return killed the SDA hide until the session's first ad
+        // break. SDAs render independently of the video player (they are a page-level overlay,
+        // not an m3u8 segment), so they need no player root: both queries below start at
+        // document. The <video> ad guard below is independent of it too: it keys off
+        // playerForMonitoringBuffering (optional-chained) and only ever hides an element whose
+        // src is on the ad CDN, which a blob:-fed live player cannot match.
         // Hide stream display ad (SDA) wrapper
         const sdaElements = document.querySelectorAll('[data-test-selector="sda-wrapper"]');
         for (let i = 0; i < sdaElements.length; i++) {
+            // Re-assert every tick rather than only on first sight: a React re-render can drop
+            // the inline style while keeping the element, and a once-only apply would leave the
+            // ad visible for the rest of the session. Same reasoning as the <video> guard below.
+            sdaElements[i].style.setProperty('display', 'none', 'important');
             if (!sdaElements[i].dataset.tasHidden) {
-                sdaElements[i].dataset.tasHidden = '';
-                sdaElements[i].style.setProperty('display', 'none', 'important');
+                // '1', not '': dataset reads the empty string back as-is, which is falsy, so an
+                // '' marker never dedupes anything — the same trap fixed for tasAdHidden in v68.5.6.
+                sdaElements[i].dataset.tasHidden = '1';
                 if (!loggedSdaHide) {
                     loggedSdaHide = true;
                     console.log('[AD DEBUG] Hidden Twitch stream display ad');
