@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft-testing)
 // @namespace    https://github.com/RoxyCoding/TwitchAdSolutions
-// @version      678.0.1
+// @version      678.0.2
 // @description  Multiple solutions for blocking Twitch ads (vaft testing variant)
 // @updateURL    https://github.com/RoxyCoding/TwitchAdSolutions/raw/main/vaft/vaft_testing.user.js
 // @downloadURL  https://github.com/RoxyCoding/TwitchAdSolutions/raw/main/vaft/vaft_testing.user.js
@@ -48,7 +48,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 679;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 680;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft-testing v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft-testing v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -2502,6 +2502,37 @@
                     loggedSdaHide = true;
                     console.log('[AD DEBUG] Hidden Twitch stream display ad');
                 }
+            }
+        }
+        // Reclaim the lower third the SDA reserved. Hiding the sda-wrapper/-container above
+        // removes the ad itself, but Twitch independently SHRINKS the video to make room for
+        // it: it sets an inline height (observed: 'calc(79.0698% + 0px)') on the video's own
+        // wrapper and adds the ...--stream-display-ad_lower-third class. With the ad hidden,
+        // that reserved strip is just empty player background — the black bar across the
+        // bottom third users see while an SDA break runs.
+        // Matched on data-a-target="video-ref" — a stable exact attribute on the element that
+        // carries the inline height, so no parent walking and no generated class names (the
+        // 'Layout-sc-*' classes here are styled-components output and must not be matched).
+        // Only an inline height Twitch itself set is cleared, and only while it is a
+        // percentage shrink: the normal player leaves this height unset, so a session that
+        // never sees an SDA is never touched.
+        const videoRefs = document.querySelectorAll('[data-a-target="video-ref"]');
+        for (let i = 0; i < videoRefs.length; i++) {
+            const ref = videoRefs[i];
+            const inlineHeight = ref.style.height || '';
+            // Re-assert every tick: React re-renders the shrink back on, so a one-shot clear
+            // would let the black bar return mid-break.
+            if (inlineHeight && inlineHeight.indexOf('%') !== -1 && inlineHeight !== '100%') {
+                ref.style.setProperty('height', '100%', 'important');
+                if (!ref.dataset.tasVideoExpanded) {
+                    ref.dataset.tasVideoExpanded = '1';
+                    console.log('[AD DEBUG] Expanded video to fill the SDA-reserved lower third (was ' + inlineHeight + ')');
+                }
+            } else if (ref.dataset.tasVideoExpanded && !inlineHeight) {
+                // Twitch dropped its own shrink (break over) — stop overriding so the player
+                // returns to whatever layout Twitch wants next.
+                delete ref.dataset.tasVideoExpanded;
+                ref.style.removeProperty('height');
             }
         }
         // Separate video-ad guard (mirrors GosuDRM/TTV-AB v12.0.1-12.0.8 — issue #249): since

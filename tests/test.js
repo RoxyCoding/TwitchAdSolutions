@@ -673,6 +673,78 @@ for (const name of vaftFiles) {
 }
 
 // ============================================================
+// Test: SDA lower-third video expand (black bar reclaim)
+// ============================================================
+console.log('--- SDA lower-third video expand ---');
+
+function makeVideoRef(inlineHeight) {
+    const styles = { height: inlineHeight };
+    return {
+        dataset: {},
+        style: {
+            get height() { return styles.height || ''; },
+            setProperty: (k, v) => { styles[k] = v; },
+            removeProperty: (k) => { delete styles[k]; }
+        },
+        _styles: styles
+    };
+}
+
+// Mirrors the shipped video-ref branch of hideTwitchAdOverlays().
+let videoExpandLogs = 0;
+function expandVideoRefs(refs) {
+    for (let i = 0; i < refs.length; i++) {
+        const ref = refs[i];
+        const inlineHeight = ref.style.height || '';
+        if (inlineHeight && inlineHeight.indexOf('%') !== -1 && inlineHeight !== '100%') {
+            ref.style.setProperty('height', '100%', 'important');
+            if (!ref.dataset.tasVideoExpanded) {
+                ref.dataset.tasVideoExpanded = '1';
+                videoExpandLogs++;
+            }
+        } else if (ref.dataset.tasVideoExpanded && !inlineHeight) {
+            delete ref.dataset.tasVideoExpanded;
+            ref.style.removeProperty('height');
+        }
+    }
+}
+
+// The shrink Twitch applies to reserve the lower third for the SDA.
+const shrunkRef = makeVideoRef('calc(79.0698% + 0px)');
+expandVideoRefs([shrunkRef]);
+assertEq(shrunkRef._styles.height, '100%', 'video expanded to fill the SDA-reserved strip');
+assertEq(shrunkRef.dataset.tasVideoExpanded, '1', 'expand marker is truthy so the dedup dedupes');
+assertEq(videoExpandLogs, 1, 'expand logged once');
+
+// A React re-render re-applies the shrink: the next tick must re-expand, without re-logging.
+shrunkRef._styles.height = 'calc(79.0698% + 0px)';
+expandVideoRefs([shrunkRef]);
+assertEq(shrunkRef._styles.height, '100%', 're-expanded after a re-render restored the shrink');
+assertEq(videoExpandLogs, 1, 'repeat ticks do not re-log');
+
+// Break over: Twitch drops its own inline height, so we must stop overriding.
+delete shrunkRef._styles.height;
+expandVideoRefs([shrunkRef]);
+assertEq(shrunkRef._styles.height, undefined, 'override released once Twitch cleared its shrink');
+assertEq(shrunkRef.dataset.tasVideoExpanded, undefined, 'expand marker cleared on release');
+
+// A player with no inline height (no SDA this session) must never be touched.
+const untouchedRef = makeVideoRef('');
+expandVideoRefs([untouchedRef]);
+assertEq(untouchedRef._styles.height, '', 'a player without an SDA shrink is left alone');
+assertEq(untouchedRef.dataset.tasVideoExpanded, undefined, 'no marker set on an untouched player');
+
+// The shipped sources must keep targeting the stable attribute, not a generated class.
+for (const name of vaftFiles) {
+    const s = fs.readFileSync(path.join(vaftDir, name), 'utf8');
+    const fi = s.indexOf('function hideTwitchAdOverlays()');
+    assert(s.indexOf('data-a-target="video-ref"', fi) !== -1,
+        name + ' expands the video via the stable video-ref attribute');
+    assert(!/querySelectorAll\([^)]*Layout-sc/.test(s),
+        name + ' does not match on generated styled-components class names');
+}
+
+// ============================================================
 // Test: auto-unmute clears Twitch mutes but respects user intent
 // ============================================================
 console.log('--- auto-unmute ---');

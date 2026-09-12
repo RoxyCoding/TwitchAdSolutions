@@ -32,7 +32,7 @@ uBlock files have `twitch-videoad.js text/javascript` as line 1 (not valid JS �
 
 ## Versions
 
-Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.5.10/94, video-swap-new 1.87/55, strip 1.10/27. Testing: vaft 678.0.1/679, video-swap-new -/621.
+Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.5.11/95, video-swap-new 1.87/55, strip 1.10/27. Testing: vaft 678.0.2/680, video-swap-new -/621.
 
 ## localStorage Config
 
@@ -113,7 +113,8 @@ Disable with `twitchAdSolutions_autoUnmute='false'`.
 ## Ad Overlay Hiding
 
 `hideTwitchAdOverlays()` hides one overlay type during ad blocking:
-- **Stream display ads (SDA)** — via exact selectors on the ad's own nodes, no parent walking: `[data-test-selector="sda-wrapper"]` plus the layout container (`[data-a-target="sda-container"]`, `[data-test-selector="sda-container"]`). The container must be hidden too: hiding only the inner wrapper removed the ad but left the container's reserved height and dark background as a **black box over the lower third of the player** (v68.5.10).
+- **Stream display ads (SDA)** — via exact selectors on the ad's own nodes, no parent walking: `[data-test-selector="sda-wrapper"]` plus the layout container (`[data-test-selector="sda-container"]`, `[data-a-target="sda-container"]`). Both carry the 90px reserved height, so both are hidden (v68.5.10).
+- **SDA lower-third black bar** — hiding the SDA nodes is only half the fix. Twitch *independently* shrinks the video to make room for the banner: it sets an inline percentage height (observed `calc(79.0698% + 0px)`) on `[data-a-target="video-ref"]` and adds a `...--stream-display-ad_lower-third` class. With the ad hidden, that reserved strip is empty player background — the **black bar across the lower third**. Fixed by forcing that element to `height: 100%` while Twitch's percentage shrink is present, re-asserted every tick (React re-applies it), and released when Twitch clears its own inline height. Matched on the stable `data-a-target` only — the `Layout-sc-*` classes on these nodes are styled-components output and must never be matched (v68.5.11).
 
 Called on every buffer monitor tick, from session start and regardless of ad state — it is deliberately NOT gated on `cachedPlayerRootDiv` (that cache is only populated by `updateAdblockBanner()` during an ad break, which previously left the SDA hide dead until the first break). Guards via `dataset.tasHidden` to skip already-hidden elements.
 
