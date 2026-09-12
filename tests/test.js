@@ -600,33 +600,45 @@ function makeSdaEl() {
 
 // Mirrors the shipped SDA branch of hideTwitchAdOverlays().
 let sdaLogCount = 0;
+// The shipped code logs at most once per page load (loggedSdaHide), not once per element:
+// the wrapper and its container are both hidden, but that is one event to the user.
+let loggedSdaHide = false;
 function hideSdaOverlays(doc) {
-    const els = doc.querySelectorAll('[data-test-selector="sda-wrapper"]');
+    const els = doc.querySelectorAll('[data-test-selector="sda-wrapper"],[data-a-target="sda-container"],[data-test-selector="sda-container"]');
     for (let i = 0; i < els.length; i++) {
         els[i].style.setProperty('display', 'none', 'important');
         if (!els[i].dataset.tasHidden) {
             els[i].dataset.tasHidden = '1';
-            sdaLogCount++;
+            if (!loggedSdaHide) {
+                loggedSdaHide = true;
+                sdaLogCount++;
+            }
         }
     }
 }
 
 const sdaEl = makeSdaEl();
+// The container is the node that reserved the black box when only the wrapper was hidden.
+const sdaContainerEl = makeSdaEl();
+const SDA_SELECTOR = '[data-test-selector="sda-wrapper"],[data-a-target="sda-container"],[data-test-selector="sda-container"]';
 const sdaDoc = {
-    querySelectorAll: (sel) => sel === '[data-test-selector="sda-wrapper"]' ? [sdaEl] : []
+    querySelectorAll: (sel) => sel === SDA_SELECTOR ? [sdaEl, sdaContainerEl] : []
 };
 
 // No ad break has happened, so no player root exists — the SDA must still be hidden.
 hideSdaOverlays(sdaDoc);
 assertEq(sdaEl._styles.display, 'none', 'SDA hidden on a clean stream (no ad break yet)');
+assertEq(sdaContainerEl._styles.display, 'none', 'SDA container hidden too (no black box left behind)');
 assertEq(sdaEl.dataset.tasHidden, '1', 'SDA marker is truthy so the dedup actually dedupes');
 assertEq(sdaLogCount, 1, 'SDA hide logged once');
 
 // A React re-render can drop the inline style while keeping the element: the next tick must
 // re-hide it, but must not log again.
 delete sdaEl._styles.display;
+delete sdaContainerEl._styles.display;
 hideSdaOverlays(sdaDoc);
 assertEq(sdaEl._styles.display, 'none', 'SDA re-hidden after a re-render dropped the style');
+assertEq(sdaContainerEl._styles.display, 'none', 'SDA container re-hidden after a re-render');
 assertEq(sdaLogCount, 1, 'repeat ticks do not re-log');
 
 // The shipped sources must not reintroduce the cachedPlayerRootDiv early return.
@@ -645,6 +657,10 @@ for (const name of vaftFiles) {
     assert(fnIdx !== -1, name + ' still defines hideTwitchAdOverlays');
     const sdaIdx = src.indexOf('data-test-selector="sda-wrapper"', fnIdx);
     assert(sdaIdx !== -1, name + ' still hides the SDA wrapper');
+    // The container must be hidden alongside the wrapper, or the ad slot stays as a black box
+    // over the lower third of the player.
+    assert(src.indexOf('sda-container', fnIdx) !== -1,
+        name + ' also hides the SDA container (black-box fix)');
     // Between the function opening and the SDA query there must be no early return
     // on the player-root cache.
     const head = src.slice(fnIdx, sdaIdx);

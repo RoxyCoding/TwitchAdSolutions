@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/RoxyCoding/TwitchAdSolutions
-// @version      68.5.9
+// @version      68.5.10
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/RoxyCoding/TwitchAdSolutions/raw/main/vaft/vaft.user.js
 // @downloadURL  https://github.com/RoxyCoding/TwitchAdSolutions/raw/main/vaft/vaft.user.js
@@ -47,7 +47,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 93;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 94;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -2427,8 +2427,13 @@
         // document. The <video> ad guard below is independent of it too: it keys off
         // playerForMonitoringBuffering (optional-chained) and only ever hides an element whose
         // src is on the ad CDN, which a blob:-fed live player cannot match.
-        // Hide stream display ad (SDA) wrapper
-        const sdaElements = document.querySelectorAll('[data-test-selector="sda-wrapper"]');
+        // Hide stream display ad (SDA) wrapper AND its layout container.
+        // Hiding only the inner wrapper left a black box over the lower third of the player:
+        // the ad content disappeared, but the container Twitch renders around it keeps its
+        // reserved height and dark background, so the empty slot stayed visible for the whole
+        // break. Both selectors are exact data-attribute matches on the ad's own nodes — no
+        // parent walking, no class-name or text matching (see CLAUDE.md).
+        const sdaElements = document.querySelectorAll('[data-test-selector="sda-wrapper"],[data-a-target="sda-container"],[data-test-selector="sda-container"]');
         for (let i = 0; i < sdaElements.length; i++) {
             // Re-assert every tick rather than only on first sight: a React re-render can drop
             // the inline style while keeping the element, and a once-only apply would leave the
