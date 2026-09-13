@@ -96,6 +96,7 @@
         scope.DisableAdSpoofing = true;// Default OFF (was ON through v68.2.0). The always-100%-watched + audible + visible spoof beacon pattern may itself fingerprint as anomalous and trigger detection escalation (CSAI reaching the committed backup) — observed correlation in field + TTV-AB maintainer hypothesis. Spoof-accepted (no GQL rejection) does NOT prove not-fingerprinted; Twitch can 200-OK while using the beacon pattern as silent detection input. Opt in by setting twitchAdSolutions_disableAdSpoofing=false to re-enable the GQL ad-tracking beacons (video_ad_impression, video_ad_quartile_complete x 4, video_ad_pod_complete).
         scope.RecoverFromSilentMute = true;// On hard reload, if the element is already muted but vaft has successfully unmuted at any point earlier this session, treat it as a silent Twitch re-mute and recover via the backstop. Default on; set twitchAdSolutions_recoverFromSilentMute=false to disable (useful for users who deliberately mute mid-session).
         scope.AutoUnmute = true;// Continuously clear Twitch's own mutes (page load, post-ad, silent re-mute) on the buffer-monitor tick, syncing both video.muted and the DOM mute button. Never overrides a mute the USER set: localStorage video-muted '{"default":true}' and manual m-key/button presses are respected. Default on; set twitchAdSolutions_autoUnmute=false to disable.
+        scope.BlockCsaiAdRequests = true;// Fail every request to edge.ads.twitch.tv (Twitch's client-side ad server) the way a network filter would, so the player's ad SDK never receives a creative and the separate video-ad slot (#249) is never rendered at all. Same outcome Pi-hole / uBO network-filter users have always had; the m3u8 side (SSAI markers, backup swap) is untouched. Default on; set twitchAdSolutions_blockCsaiAdRequests=false to only log those requests as before.
         scope.SoftReloadNoStrip = true;// Issue #129 (mode D): post-ad reload uses SOFT reload when the break stripped no segments (BackupSwapFirst CSAI swap). Hard reload's MediaSource flush is only needed after strip injection (BLANK_MP4/recovery) — on a no-strip break it just pays the desktop black-screen + play-icon teardown for nothing. Default on; set twitchAdSolutions_softReloadNoStrip=false to force the old always-hard behavior.
         scope.DisablePostBreakWedge = false;// Post-break video-wedge recovery (mirrors GosuDRM/TTV-AB _checkPostBreakWedge, v12.0.0). Detects "audio running, video frozen" after an ad break — playhead advancing while the decoder emits no new frames — via getVideoPlaybackQuality().totalVideoFrames, which the currentTime-based freeze checks can't see. Default on. Set twitchAdSolutions_disablePostBreakWedge=true to turn it OFF.
         scope.SkipPlayerReloadOnHevc = false;// If true this will skip player reload on streams which have 2k/4k quality (if you enable this and you use the 2k/4k quality setting you'll get error #4000 / #3000 / spinning wheel on chrome based browsers). Despite the name, gates BOTH enhanced families (HEVC and AV1) since v68.5.3.
@@ -3106,6 +3107,18 @@
         const realFetch = window.fetch;
         window.realFetch = realFetch;
         window.fetch = maskAsNative(function(url, init) {
+            // Client-side ad server. Checked on every input form (string / URL / Request) so the
+            // block cannot be sidestepped by how the SDK builds the call; the GQL hook below still
+            // works on the string form Twitch uses for it.
+            const requestUrl = typeof url === 'string' ? url : (url instanceof Request ? url.url : (url instanceof URL ? url.href : ''));
+            if (requestUrl.includes('edge.ads.twitch.tv')) {
+                const csaiType = requestUrl.includes('bp=midroll') ? 'midroll' : requestUrl.includes('bp=preroll') ? 'preroll' : 'unknown';
+                countCsaiRequest(csaiType, BlockCsaiAdRequests ? 'fetch, blocked' : 'fetch');
+                if (BlockCsaiAdRequests) {
+                    // Reject like a network filter would — no fake body for the SDK to misparse.
+                    return Promise.reject(new TypeError('Failed to fetch'));
+                }
+            }
             if (typeof url === 'string') {
                 if (url.includes('gql')) {
                     let deviceId = init.headers['X-Device-Id'];
@@ -3157,10 +3170,6 @@
                             init.body = JSON.stringify(newBody);
                         }
                     }
-                }
-                if (url.includes('edge.ads.twitch.tv')) {
-                    const csaiType = url.includes('bp=midroll') ? 'midroll' : url.includes('bp=preroll') ? 'preroll' : 'unknown';
-                    countCsaiRequest(csaiType, 'fetch');
                 }
             }
             return realFetch.apply(this, arguments);
@@ -3290,6 +3299,11 @@
             AutoUnmute = false;
             console.log('[AD DEBUG] AutoUnmute disabled via localStorage — Twitch mutes (page load, post-ad, silent re-mute) will no longer be cleared automatically');
         }
+        const lsBlockCsai = localStorage.getItem('twitchAdSolutions_blockCsaiAdRequests');
+        if (lsBlockCsai === 'false') {
+            BlockCsaiAdRequests = false;
+            console.log('[AD DEBUG] BlockCsaiAdRequests disabled via localStorage — edge.ads.twitch.tv requests are logged but allowed through (the separate video-ad slot will render and be hidden / fast-forwarded instead)');
+        }
         const lsSoftReloadNoStrip = localStorage.getItem('twitchAdSolutions_softReloadNoStrip');
         if (lsSoftReloadNoStrip === 'false') {
             SoftReloadNoStrip = false;
@@ -3307,18 +3321,64 @@
             (document.head || document.documentElement).appendChild(style);
         }
     } catch {}
+    // Separate video-ad slot (#249), hidden before first paint. The buffer-monitor guard also hides
+    // it, but only on its next tick (600ms) — long enough for the black box to paint once. A
+    // stylesheet installed here at document-start closes that gap. Three independent rules so an
+    // unsupported selector (:has needs Chrome 105 / Firefox 121 / Safari 15.4) drops only itself:
+    //   1. the ad <video>, by the ad-CDN host in its src — the live player is always blob:
+    //   2. the slot's control bar (Twitch's hand-written class, not a generated one)
+    //   3. the collapsible slot container: an inline `transition: max-height` div that CONTAINS the
+    //      control bar or the ad video. Both halves are required, so neither the main player (not
+    //      inside such a container) nor an unrelated collapsible panel (no ad inside) can match.
+    // Restore is implicit: every rule keys off something only the ad has, so a recycled node stops
+    // matching the moment its src changes. The JS guard keeps the mute / fast-forward / re-assert.
+    try {
+        const adSlotStyle = document.createElement('style');
+        adSlotStyle.textContent = [
+            'video[src*="media-amazon.com/"] { display: none !important; }',
+            '.outstream-controls { display: none !important; }',
+            'div[style*="transition: max-height"]:has(.outstream-controls, video[src*="media-amazon.com/"]) { display: none !important; }'
+        ].join(' ');
+        (document.head || document.documentElement).appendChild(adSlotStyle);
+    } catch {}
     console.log('[AD DEBUG] Config: ReloadPlayerAfterAd = ' + ReloadPlayerAfterAd + ', ForceAccessTokenPlayerType = ' + ForceAccessTokenPlayerType + ', PinBackupPlayerType = ' + PinBackupPlayerType);
     hookWindowWorker();
     hookFetch();
     // Hook XHR to detect CSAI ad requests that bypass fetch
+    // Same for XHR (the SDK has been seen using both). open() tags the instance; send() then
+    // fails it asynchronously with the exact sequence the browser fires for a blocked request —
+    // DONE / status 0 / readystatechange → error → loadend — so the SDK's normal error path runs
+    // instead of a synchronous throw inside its own call stack.
     const realXHROpen = XMLHttpRequest.prototype.open;
+    const realXHRSend = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.open = maskAsNative(function(method, url) {
-        if (typeof url === 'string' && url.includes('edge.ads.twitch.tv')) {
-            const csaiType = url.includes('bp=midroll') ? 'midroll' : url.includes('bp=preroll') ? 'preroll' : 'unknown';
-            countCsaiRequest(csaiType, 'xhr');
+        const requestUrl = typeof url === 'string' ? url : (url instanceof URL ? url.href : '');
+        this.__tasBlockedAdRequest = false;// re-open() on the same instance must not inherit the tag
+        if (requestUrl.includes('edge.ads.twitch.tv')) {
+            const csaiType = requestUrl.includes('bp=midroll') ? 'midroll' : requestUrl.includes('bp=preroll') ? 'preroll' : 'unknown';
+            countCsaiRequest(csaiType, BlockCsaiAdRequests ? 'xhr, blocked' : 'xhr');
+            this.__tasBlockedAdRequest = BlockCsaiAdRequests;
         }
         return realXHROpen.apply(this, arguments);
     }, 'open');
+    XMLHttpRequest.prototype.send = maskAsNative(function() {
+        if (!this.__tasBlockedAdRequest) {
+            return realXHRSend.apply(this, arguments);
+        }
+        const xhr = this;
+        setTimeout(() => {
+            try {
+                const emptyResponse = (xhr.responseType === '' || xhr.responseType === 'text') ? '' : null;
+                const finalState = { readyState: 4, status: 0, statusText: '', response: emptyResponse, responseText: '', responseURL: '' };
+                for (const key in finalState) {
+                    Object.defineProperty(xhr, key, { value: finalState[key], configurable: true });
+                }
+                xhr.dispatchEvent(new Event('readystatechange'));
+                xhr.dispatchEvent(new ProgressEvent('error'));
+                xhr.dispatchEvent(new ProgressEvent('loadend'));
+            } catch {}
+        }, 0);
+    }, 'send');
     if (PlayerBufferingFix) {
         monitorPlayerBuffering();
     }
