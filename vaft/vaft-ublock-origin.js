@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 95;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 96;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -165,6 +165,7 @@ twitch-videoad.js text/javascript
             LastCleanNativeM3U8: null,
             LastCleanNativePlaylistAt: 0,
             BackupEncodingsM3U8Cache: [],
+            BackupProbePrefetch: Object.create(null),// playerType -> in-flight probeBackupPlayerType() promise (preroll warm-up)
             ActiveBackupPlayerType: null,
             PinnedBackupPlayerType: null,
             LastCommittedBackupPlayerType: null,
@@ -331,6 +332,8 @@ twitch-videoad.js text/javascript
                     ${stripAdSegments.toString()}
                     ${videoCodecFamily.toString()}
                     ${getStreamUrlForResolution.toString()}
+                    ${fetchBackupMediaM3u8.toString()}
+                    ${probeBackupPlayerType.toString()}
                     ${processM3U8.toString()}
                     ${hookWorkerFetch.toString()}
                     ${declareOptions.toString()}
@@ -1076,6 +1079,79 @@ twitch-videoad.js text/javascript
         }
         return closestResolutionUrl;
     }
+    // Media half of a backup probe: pick the variant matching the primary's resolution out of a
+    // backup encodings m3u8 and fetch it. Returns the playlist text, or null on a non-200 / thrown
+    // fetch (logged). Shared by the warm-cache path in the probe loop and probeBackupPlayerType.
+    async function fetchBackupMediaM3u8(encodingsM3u8, currentResolution, realPlayerType, realFetch) {
+        try {
+            const streamM3u8Response = await realFetch(getStreamUrlForResolution(encodingsM3u8, currentResolution));
+            if (streamM3u8Response.status == 200) {
+                return await streamM3u8Response.text();
+            }
+            console.log('[AD DEBUG] Backup stream fetch failed for ' + realPlayerType + ' (status ' + streamM3u8Response.status + ')');
+        } catch (err) {
+            console.log('[AD DEBUG] Backup stream error for ' + realPlayerType + ': ' + err.message);
+        }
+        return null;
+    }
+    // One cold backup probe end to end: PlaybackAccessToken GQL -> usher encodings m3u8 -> media
+    // m3u8 for the current resolution. Split out of the probe loop in processM3U8 so a preroll can
+    // run every candidate's round-trips concurrently (see the warm-up block there). Resolves to
+    // { encodingsM3u8, m3u8Text } (m3u8Text null when the media fetch failed) or null when the
+    // token / usher step failed. Failure bookkeeping (5s FailedBackupPlayerTypes lockout,
+    // ConsecutiveTokenFetchFailures diagnostic) lives here so a failed prefetch is never refetched.
+    async function probeBackupPlayerType(streamInfo, realPlayerType, currentResolution, realFetch) {
+        const markTokenFailure = () => {
+            streamInfo.FailedBackupPlayerTypes.set(realPlayerType, Date.now());
+            streamInfo.ConsecutiveTokenFetchFailures = (streamInfo.ConsecutiveTokenFetchFailures || 0) + 1;
+            if (streamInfo.ConsecutiveTokenFetchFailures >= 3 && !streamInfo.LoggedTokenFailureStreak) {
+                streamInfo.LoggedTokenFailureStreak = true;
+                console.log('[AD DEBUG] Token fetch failed ' + streamInfo.ConsecutiveTokenFetchFailures + ' times consecutively across player types — possible Twitch detection / integrity rotation / rate limiting');
+            }
+        };
+        let encodingsM3u8 = null;
+        try {
+            const accessTokenResponse = await getAccessToken(streamInfo.ChannelName, realPlayerType);
+            if (accessTokenResponse.status === 200) {
+                const accessToken = await accessTokenResponse.json();
+                // Twitch returns streamPlaybackAccessToken in two observed shapes:
+                //   { data: { streamPlaybackAccessToken: {...} } } (most player types)
+                //   { streamPlaybackAccessToken: {...} } (flatter, observed for 'embed')
+                // Accept either. Field-observed silently dropping embed backup otherwise.
+                const spat = accessToken?.data?.streamPlaybackAccessToken || accessToken?.streamPlaybackAccessToken;
+                if (!spat) {
+                    const errInfo = accessToken?.errors ? ' errors: ' + JSON.stringify(accessToken.errors).substring(0, 300) : '';
+                    console.log('[AD DEBUG] GQL response missing streamPlaybackAccessToken for ' + realPlayerType + '. Response keys: ' + JSON.stringify(Object.keys(accessToken || {})) + errInfo);
+                    markTokenFailure();
+                    return null;
+                }
+                const urlInfo = new URL('https://usher.ttvnw.net/api/' + (V2API ? 'v2/' : '') + 'channel/hls/' + streamInfo.ChannelName + '.m3u8' + streamInfo.UsherParams);
+                urlInfo.searchParams.set('sig', spat.signature);
+                urlInfo.searchParams.set('token', spat.value);
+                const encodingsM3u8Response = await realFetch(urlInfo.href);
+                if (encodingsM3u8Response.status === 200) {
+                    encodingsM3u8 = await encodingsM3u8Response.text();
+                    // Reset detection diagnostic counter on success — token fetched, m3u8 fetched.
+                    streamInfo.ConsecutiveTokenFetchFailures = 0;
+                    streamInfo.LoggedTokenFailureStreak = false;
+                } else {
+                    console.log('[AD DEBUG] Usher HTTP ' + encodingsM3u8Response.status + ' for ' + realPlayerType);
+                }
+            } else {
+                let errorBody = '';
+                try { errorBody = ' — ' + (await accessTokenResponse.text()).substring(0, 200); } catch {}
+                console.log('[AD DEBUG] Access token HTTP ' + accessTokenResponse.status + ' for ' + realPlayerType + (accessTokenResponse.status === 403 ? ' (integrity: ' + (ClientIntegrityHeader ? 'present' : 'missing') + ')' : '') + errorBody);
+                markTokenFailure();
+            }
+        } catch (err) {
+            console.log('[AD DEBUG] Access token failed for ' + realPlayerType + ': ' + err.message);
+            markTokenFailure();
+        }
+        if (!encodingsM3u8) {
+            return null;
+        }
+        return { encodingsM3u8, m3u8Text: await fetchBackupMediaM3u8(encodingsM3u8, currentResolution, realPlayerType, realFetch) };
+    }
     // Core ad-blocking logic: detect ads in m3u8, fetch backup streams, strip ad segments
     async function processM3U8(url, textStr, realFetch) {
         const streamInfo = StreamInfosByUrl[url];
@@ -1357,6 +1433,29 @@ twitch-videoad.js text/javascript
                     }
                 }
             }
+            // Preroll warm-up: on a page load / channel switch every candidate type is cold and the
+            // player has nothing buffered yet, so each sequential probe (token -> usher -> media m3u8,
+            // ~0.4-0.5s) is dead air before the first frame — 4 ad-laden Source types + autoplay was
+            // ~2s of black screen. Start every candidate's probe now and let the loop below await
+            // them in its usual order: commit semantics are unchanged, the round-trips just overlap.
+            // First poll of the break only (ActiveBackupPlayerType still null) — on later polls the
+            // committed type is warm and wins on the first try, so a burst would be wasted tokens
+            // every 2s. Midroll keeps the sequential path for the same reason (pinned type usually
+            // warm) and because the player has buffer to ride the probe out.
+            let warmUpProbes = 0;
+            if (!streamInfo.IsMidroll && !isDoingMinimalRequests && streamInfo.ActiveBackupPlayerType == null) {
+                for (let i = startIndex; i < playerTypesToTry.length; i++) {
+                    const playerType = playerTypesToTry[i];
+                    const realPlayerType = playerType.replace('-CACHED', '');
+                    const failedAt = streamInfo.FailedBackupPlayerTypes.get(realPlayerType);
+                    if (streamInfo.BackupEncodingsM3U8Cache[playerType] || streamInfo.BackupProbePrefetch[playerType] || (failedAt && (Date.now() - failedAt) < 5000)) {
+                        continue;
+                    }
+                    warmUpProbes++;
+                    backupColdTokenFetches++;
+                    streamInfo.BackupProbePrefetch[playerType] = probeBackupPlayerType(streamInfo, realPlayerType, currentResolution, realFetch);
+                }
+            }
             for (let playerTypeIndex = startIndex; !backupM3u8 && playerTypeIndex < playerTypesToTry.length; playerTypeIndex++) {
                 const playerType = playerTypesToTry[playerTypeIndex];
                 const realPlayerType = playerType.replace('-CACHED', '');
@@ -1373,120 +1472,73 @@ twitch-videoad.js text/javascript
                     // This caches the m3u8 if it doesn't have ads. If the already existing cache has ads it fetches a new version (second loop)
                     let isFreshM3u8 = false;
                     let encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType];
+                    let m3u8Text = null;
                     if (!encodingsM3u8) {
                         isFreshM3u8 = true;
-                        backupColdTokenFetches++;
-                        try {
-                            const accessTokenResponse = await getAccessToken(streamInfo.ChannelName, realPlayerType);
-                            if (accessTokenResponse.status === 200) {
-                                const accessToken = await accessTokenResponse.json();
-                                // Twitch returns streamPlaybackAccessToken in two observed shapes:
-                                //   { data: { streamPlaybackAccessToken: {...} } } (most player types)
-                                //   { streamPlaybackAccessToken: {...} } (flatter, observed for 'embed')
-                                // Accept either. Field-observed silently dropping embed backup otherwise.
-                                const spat = accessToken?.data?.streamPlaybackAccessToken || accessToken?.streamPlaybackAccessToken;
-                                if (!spat) {
-                                    const errInfo = accessToken?.errors ? ' errors: ' + JSON.stringify(accessToken.errors).substring(0, 300) : '';
-                                    console.log('[AD DEBUG] GQL response missing streamPlaybackAccessToken for ' + realPlayerType + '. Response keys: ' + JSON.stringify(Object.keys(accessToken || {})) + errInfo);
-                                    streamInfo.FailedBackupPlayerTypes.set(realPlayerType, Date.now());
-                                    streamInfo.ConsecutiveTokenFetchFailures = (streamInfo.ConsecutiveTokenFetchFailures || 0) + 1;
-                                    if (streamInfo.ConsecutiveTokenFetchFailures >= 3 && !streamInfo.LoggedTokenFailureStreak) {
-                                        streamInfo.LoggedTokenFailureStreak = true;
-                                        console.log('[AD DEBUG] Token fetch failed ' + streamInfo.ConsecutiveTokenFetchFailures + ' times consecutively across player types — possible Twitch detection / integrity rotation / rate limiting');
-                                    }
-                                    continue;
-                                }
-                                const urlInfo = new URL('https://usher.ttvnw.net/api/' + (V2API ? 'v2/' : '') + 'channel/hls/' + streamInfo.ChannelName + '.m3u8' + streamInfo.UsherParams);
-                                urlInfo.searchParams.set('sig', spat.signature);
-                                urlInfo.searchParams.set('token', spat.value);
-                                const encodingsM3u8Response = await realFetch(urlInfo.href);
-                                if (encodingsM3u8Response.status === 200) {
-                                    encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType] = await encodingsM3u8Response.text();
-                                    // Reset detection diagnostic counter on success — token fetched, m3u8 fetched.
-                                    streamInfo.ConsecutiveTokenFetchFailures = 0;
-                                    streamInfo.LoggedTokenFailureStreak = false;
+                        // Cold path: the whole probe (token -> usher -> media m3u8) runs in
+                        // probeBackupPlayerType. The preroll warm-up above may already have one in
+                        // flight for this type; otherwise start it now.
+                        let probe = streamInfo.BackupProbePrefetch[playerType];
+                        if (probe) {
+                            delete streamInfo.BackupProbePrefetch[playerType];
+                        } else {
+                            backupColdTokenFetches++;
+                            probe = probeBackupPlayerType(streamInfo, realPlayerType, currentResolution, realFetch);
+                        }
+                        const probeResult = await probe;
+                        if (probeResult) {
+                            encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType] = probeResult.encodingsM3u8;
+                            m3u8Text = probeResult.m3u8Text;
+                        }
+                    } else {
+                        // Warm path: encodings cached from an earlier commit — only the media m3u8 is fetched.
+                        m3u8Text = await fetchBackupMediaM3u8(encodingsM3u8, currentResolution, realPlayerType, realFetch);
+                    }
+                    if (m3u8Text) {
+                        if (playerType == FallbackPlayerType) {
+                            fallbackM3u8 = m3u8Text;
+                        }
+                        if ((!hasAdTags(m3u8Text) && (SimulatedAdsDepth == 0 || playerTypeIndex >= SimulatedAdsDepth - 1)) || (!fallbackM3u8 && playerTypeIndex >= playerTypesToTry.length - 1)) {
+                            if ((streamInfo.ConsecutiveAllStrippedPolls || 0) >= 1 && !hasAdTags(m3u8Text)) {
+                                const prevType = streamInfo.LastCommittedBackupPlayerType;
+                                if (prevType && prevType !== playerType) {
+                                    console.log('[AD DEBUG] Cycle switched to different clean type (' + playerType + ', was ' + prevType + ') during freeze — recovered without reload');
+                                    // Only mark as cycle-rescued when we ACTUALLY switched player types.
+                                    // Natural recovery (same type became clean) still needs the end-of-break
+                                    // reload to refresh the player buffer — skipping it leaves the player
+                                    // stuck with low buffer and the buffer monitor unable to recover.
+                                    streamInfo.CycleRescuedThisBreak = true;
                                 } else {
-                                    console.log('[AD DEBUG] Usher HTTP ' + encodingsM3u8Response.status + ' for ' + realPlayerType);
-                                }
-                            } else {
-                                let errorBody = '';
-                                try { errorBody = ' — ' + (await accessTokenResponse.text()).substring(0, 200); } catch {}
-                                console.log('[AD DEBUG] Access token HTTP ' + accessTokenResponse.status + ' for ' + realPlayerType + (accessTokenResponse.status === 403 ? ' (integrity: ' + (ClientIntegrityHeader ? 'present' : 'missing') + ')' : '') + errorBody);
-                                streamInfo.FailedBackupPlayerTypes.set(realPlayerType, Date.now());
-                                streamInfo.ConsecutiveTokenFetchFailures = (streamInfo.ConsecutiveTokenFetchFailures || 0) + 1;
-                                if (streamInfo.ConsecutiveTokenFetchFailures >= 3 && !streamInfo.LoggedTokenFailureStreak) {
-                                    streamInfo.LoggedTokenFailureStreak = true;
-                                    console.log('[AD DEBUG] Token fetch failed ' + streamInfo.ConsecutiveTokenFetchFailures + ' times consecutively across player types — possible Twitch detection / integrity rotation / rate limiting');
+                                    console.log('[AD DEBUG] Same backup type (' + playerType + ') became clean during freeze — natural recovery');
                                 }
                             }
-                        } catch (err) {
-                            console.log('[AD DEBUG] Access token failed for ' + realPlayerType + ': ' + err.message);
-                            streamInfo.FailedBackupPlayerTypes.set(realPlayerType, Date.now());
-                            streamInfo.ConsecutiveTokenFetchFailures = (streamInfo.ConsecutiveTokenFetchFailures || 0) + 1;
-                            if (streamInfo.ConsecutiveTokenFetchFailures >= 3 && !streamInfo.LoggedTokenFailureStreak) {
-                                streamInfo.LoggedTokenFailureStreak = true;
-                                console.log('[AD DEBUG] Token fetch failed ' + streamInfo.ConsecutiveTokenFetchFailures + ' times consecutively across player types — possible Twitch detection / integrity rotation / rate limiting');
+                            backupPlayerType = playerType;
+                            backupM3u8 = m3u8Text;
+                            break;
+                        }
+                        if (hasAdTags(m3u8Text)) {
+                            if (!streamInfo.LoggedBackupAdsByType) streamInfo.LoggedBackupAdsByType = new Set();
+                            if (!streamInfo.LoggedBackupAdsByType.has(playerType)) {
+                                streamInfo.LoggedBackupAdsByType.add(playerType);
+                                console.log('[AD DEBUG] Backup stream (' + playerType + ') also has ads');
                             }
                         }
-                    }
-                    if (encodingsM3u8) {
-                        try {
-                            const streamM3u8Url = getStreamUrlForResolution(encodingsM3u8, currentResolution);
-                            const streamM3u8Response = await realFetch(streamM3u8Url);
-                            if (streamM3u8Response.status == 200) {
-                                const m3u8Text = await streamM3u8Response.text();
-                                if (m3u8Text) {
-                                    if (playerType == FallbackPlayerType) {
-                                        fallbackM3u8 = m3u8Text;
-                                    }
-                                    if ((!hasAdTags(m3u8Text) && (SimulatedAdsDepth == 0 || playerTypeIndex >= SimulatedAdsDepth - 1)) || (!fallbackM3u8 && playerTypeIndex >= playerTypesToTry.length - 1)) {
-                                        if ((streamInfo.ConsecutiveAllStrippedPolls || 0) >= 1 && !hasAdTags(m3u8Text)) {
-                                            const prevType = streamInfo.LastCommittedBackupPlayerType;
-                                            if (prevType && prevType !== playerType) {
-                                                console.log('[AD DEBUG] Cycle switched to different clean type (' + playerType + ', was ' + prevType + ') during freeze — recovered without reload');
-                                                // Only mark as cycle-rescued when we ACTUALLY switched player types.
-                                                // Natural recovery (same type became clean) still needs the end-of-break
-                                                // reload to refresh the player buffer — skipping it leaves the player
-                                                // stuck with low buffer and the buffer monitor unable to recover.
-                                                streamInfo.CycleRescuedThisBreak = true;
-                                            } else {
-                                                console.log('[AD DEBUG] Same backup type (' + playerType + ') became clean during freeze — natural recovery');
-                                            }
-                                        }
-                                        backupPlayerType = playerType;
-                                        backupM3u8 = m3u8Text;
-                                        break;
-                                    }
-                                    if (hasAdTags(m3u8Text)) {
-                                        if (!streamInfo.LoggedBackupAdsByType) streamInfo.LoggedBackupAdsByType = new Set();
-                                        if (!streamInfo.LoggedBackupAdsByType.has(playerType)) {
-                                            streamInfo.LoggedBackupAdsByType.add(playerType);
-                                            console.log('[AD DEBUG] Backup stream (' + playerType + ') also has ads');
-                                        }
-                                    }
-                                    if (isFullyCachedPlayerType || isDoingMinimalRequests) {
-                                        backupPlayerType = playerType;
-                                        backupM3u8 = m3u8Text;
-                                        break;
-                                    }
-                                    // Cycle through all player types looking for a clean backup. Only commit
-                                    // an ad-laden backup as a last resort when we've exhausted all options.
-                                    // PR #89 previously committed the first ad-laden type immediately — that
-                                    // caused the v58 freeze regression (issue #112) because the strip+recovery
-                                    // loop would engage even when a clean alternate was available on another
-                                    // player type.
-                                    if (hasAdTags(m3u8Text) && playerTypeIndex >= playerTypesToTry.length - 1) {
-                                        console.log('[AD DEBUG] All backup player types ad-laden — taking ' + playerType + ' as last-resort fallback (strip+recovery path will engage)');
-                                        backupPlayerType = playerType;
-                                        backupM3u8 = m3u8Text;
-                                        break;
-                                    }
-                                }
-                            } else {
-                                console.log('[AD DEBUG] Backup stream fetch failed for ' + playerType + ' (status ' + streamM3u8Response.status + ')');
-                            }
-                        } catch (err) {
-                            console.log('[AD DEBUG] Backup stream error for ' + playerType + ': ' + err.message);
+                        if (isFullyCachedPlayerType || isDoingMinimalRequests) {
+                            backupPlayerType = playerType;
+                            backupM3u8 = m3u8Text;
+                            break;
+                        }
+                        // Cycle through all player types looking for a clean backup. Only commit
+                        // an ad-laden backup as a last resort when we've exhausted all options.
+                        // PR #89 previously committed the first ad-laden type immediately — that
+                        // caused the v58 freeze regression (issue #112) because the strip+recovery
+                        // loop would engage even when a clean alternate was available on another
+                        // player type.
+                        if (hasAdTags(m3u8Text) && playerTypeIndex >= playerTypesToTry.length - 1) {
+                            console.log('[AD DEBUG] All backup player types ad-laden — taking ' + playerType + ' as last-resort fallback (strip+recovery path will engage)');
+                            backupPlayerType = playerType;
+                            backupM3u8 = m3u8Text;
+                            break;
                         }
                     }
                     streamInfo.BackupEncodingsM3U8Cache[playerType] = null;
@@ -1495,6 +1547,9 @@ twitch-videoad.js text/javascript
                     }
                 }
             }
+            // Drop warm-up probes the loop never reached (types after the winner). Their tokens would
+            // otherwise sit in the map and be consumed as a stale "fresh" probe on a later poll.
+            streamInfo.BackupProbePrefetch = Object.create(null);
             if (!backupM3u8 && fallbackM3u8) {
                 // Don't fall back to a type we've already marked contaminated this break.
                 // Without this guard, when all Source types go ad-laden mid-break the iteration
@@ -1530,7 +1585,7 @@ twitch-videoad.js text/javascript
                     if ((PinBackupPlayerType && backupPlayerType !== 'autoplay') || sourceQualityTypes.includes(backupPlayerType)) {
                         streamInfo.PinnedBackupPlayerType = backupPlayerType;
                     }
-                    console.log(`[AD DEBUG] Blocking${(streamInfo.IsMidroll ? ' midroll ' : ' ')}ads (${backupPlayerType}) — backup found in ${Date.now() - backupSearchStart}ms${backupColdTokenFetches > 0 ? ` (cold cache: ${backupColdTokenFetches} token fetch${backupColdTokenFetches > 1 ? 'es' : ''})` : ' (warm cache)'}`);
+                    console.log(`[AD DEBUG] Blocking${(streamInfo.IsMidroll ? ' midroll ' : ' ')}ads (${backupPlayerType}) — backup found in ${Date.now() - backupSearchStart}ms${backupColdTokenFetches > 0 ? ` (cold cache: ${backupColdTokenFetches} token fetch${backupColdTokenFetches > 1 ? 'es' : ''}${warmUpProbes > 0 ? `, ${warmUpProbes} in parallel` : ''})` : ' (warm cache)'}`);
                     if (streamInfo.EscapeHatchFired) {
                         const qualityTier = backupPlayerType === 'autoplay' ? '360p' : 'Source';
                         console.log('[AD DEBUG] Post-escape backup: ' + backupPlayerType + ' (' + qualityTier + ') — recovered from sticky-path freeze');
@@ -2352,9 +2407,15 @@ twitch-videoad.js text/javascript
         // Matched ONLY on the Amazon ad-CDN host. That is the safety property: the live stream is
         // fed by MediaSource and always carries a blob: URL, so the primary player can never match
         // this test. The player-owned element is skipped as a second, independent guard.
-        // Muted + paused as well as hidden — a display:none <video> still plays audio (TTV-AB v12.0.7).
+        // Hidden + muted + FAST-FORWARDED (was: paused, TTV-AB v12.0.7). A display:none <video> still
+        // plays audio, hence the mute. Pausing was the wrong third leg: a paused ad never fires
+        // `ended`, so Twitch's ad UI sat on "Play ad · 0:15" until its own timeout and the black ad
+        // slot stayed up for the whole break. At 16x (the max Chrome and Firefox accept) a 15s
+        // creative is over in ~1s, Twitch advances the pod and collapses the slot itself.
+        // Re-asserted every tick in case the ad player resets the rate or re-pauses.
         const primaryVideo = playerForMonitoringBuffering?.player?.getHTMLVideoElement?.();
         const allVideos = document.getElementsByTagName('video');
+        let adVideoPresent = false;
         for (let i = 0; i < allVideos.length; i++) {
             const vid = allVideos[i];
             let adHost = '';
@@ -2368,15 +2429,45 @@ twitch-videoad.js text/javascript
                 }
             } catch {}
             if (adHost && vid !== primaryVideo) {
+                adVideoPresent = true;
                 // Re-assert every tick rather than marking once: a React re-render can drop the
                 // inline style while keeping the element, and a one-shot marker would never re-hide it.
                 vid.style.setProperty('display', 'none', 'important');
-                try { vid.muted = true; if (!vid.paused) vid.pause(); } catch {}
+                try {
+                    vid.muted = true;
+                    if (vid.playbackRate < 4) {
+                        // Browsers cap the rate (16 in Chrome/Firefox, lower elsewhere) and throw
+                        // above the cap — step down until one sticks.
+                        for (const rate of [16, 8, 4]) {
+                            try { vid.playbackRate = rate; break; } catch {}
+                        }
+                    }
+                    if (vid.paused && !vid.ended) {
+                        const playPromise = vid.play();
+                        if (playPromise && playPromise.catch) { playPromise.catch(() => {}); }
+                    }
+                } catch {}
+                // The slot's black backdrop is the video's parent: an inline background:black div
+                // whose only other children are hidden label spans. Hide it too, but only when it has
+                // exactly that shape. This is the single sanctioned step up the tree (overlay-hide
+                // rule in CLAUDE.md): anchored on an element that cannot be the live player and
+                // verified by inline style + child composition, never by class name.
+                const box = vid.parentElement;
+                if (box && (box.style.backgroundColor === 'black' || box.style.backgroundColor === 'rgb(0, 0, 0)')) {
+                    let onlyAd = true;
+                    for (let c = 0; c < box.children.length; c++) {
+                        if (box.children[c] !== vid && !box.children[c].hidden) { onlyAd = false; break; }
+                    }
+                    if (onlyAd) {
+                        box.style.setProperty('display', 'none', 'important');
+                        box.dataset.tasAdBoxHidden = '1';
+                    }
+                }
                 if (!vid.dataset.tasAdHidden) {
                     // '1', not '': dataset returns the empty string as-is, which is falsy —
                     // the dedup, the restore branch and getPlayerVideoElement() would all misread it.
                     vid.dataset.tasAdHidden = '1';
-                    console.log('[AD DEBUG] Hidden separate Twitch video ad (' + adHost + ') — issue #249');
+                    console.log('[AD DEBUG] Hidden separate Twitch video ad (' + adHost + ') — fast-forwarding it so Twitch closes the slot (#249)');
                 }
             } else if (vid.dataset.tasAdHidden && !adHost) {
                 // Twitch RECYCLES <video> nodes: an element that held an ad can later be handed real
@@ -2385,8 +2476,31 @@ twitch-videoad.js text/javascript
                 // still restored. Mirrors TTV-AB v12.0.2 ("safely restores videos that Twitch reuses").
                 delete vid.dataset.tasAdHidden;
                 vid.style.removeProperty('display');
-                try { vid.muted = false; } catch {}
+                try { vid.muted = false; vid.playbackRate = 1; } catch {}
                 console.log('[AD DEBUG] Restored recycled <video> — source is no longer an ad (#249)');
+            }
+        }
+        // Release a hidden backdrop once it no longer holds a hidden ad video (Twitch recycled or
+        // removed the element) so a reused node can never stay invisible.
+        const hiddenBoxes = document.querySelectorAll('[data-tas-ad-box-hidden]');
+        for (let i = 0; i < hiddenBoxes.length; i++) {
+            if (!hiddenBoxes[i].querySelector('video[data-tas-ad-hidden]')) {
+                delete hiddenBoxes[i].dataset.tasAdBoxHidden;
+                hiddenBoxes[i].style.removeProperty('display');
+            }
+        }
+        // The slot's own control bar ("Play ad" / "Unmute ad" / captions): Twitch's hand-written
+        // `outstream-controls` class, not a generated one. Hidden only while an ad video is on the
+        // page and released otherwise, so it can never stick to anything else.
+        const adControls = document.getElementsByClassName('outstream-controls');
+        for (let i = 0; i < adControls.length; i++) {
+            const el = adControls[i];
+            if (adVideoPresent) {
+                el.style.setProperty('display', 'none', 'important');
+                el.dataset.tasAdControlsHidden = '1';
+            } else if (el.dataset.tasAdControlsHidden) {
+                delete el.dataset.tasAdControlsHidden;
+                el.style.removeProperty('display');
             }
         }
     }

@@ -4,7 +4,7 @@ Fork of pixeltris/TwitchAdSolutions (archived). Remote `origin` = pixeltris, rem
 
 ## Worker Blob Serialization (CRITICAL)
 
-Functions serialized via `.toString()` into the Web Worker blob CANNOT reference outer-scope variables. This includes: `processM3U8`, `stripAdSegments`, `hookWorkerFetch`, `getAccessToken`, `gqlRequest`, `hasAdTags`, `getMatchedAdSignifiers`, `notifyAdComplete`, `getStreamUrlForResolution`, `parseAttributes`, `getServerTimeFromM3u8`, `replaceServerTimeInM3u8`, `pruneStreamInfos`, `createStreamInfo`, `getWasmWorkerJs`, `videoCodecFamily`.
+Functions serialized via `.toString()` into the Web Worker blob CANNOT reference outer-scope variables. This includes: `processM3U8`, `stripAdSegments`, `hookWorkerFetch`, `probeBackupPlayerType`, `fetchBackupMediaM3u8`, `getAccessToken`, `gqlRequest`, `hasAdTags`, `getMatchedAdSignifiers`, `notifyAdComplete`, `getStreamUrlForResolution`, `parseAttributes`, `getServerTimeFromM3u8`, `replaceServerTimeInM3u8`, `pruneStreamInfos`, `createStreamInfo`, `getWasmWorkerJs`, `videoCodecFamily`.
 
 - Declare variables in `declareOptions()` (also serialized) or in the inline blob template literal
 - To pass window-scope values to the worker, inject after `declareOptions(self)`: e.g. `ReloadPlayerAfterAd = ${ReloadPlayerAfterAd};`
@@ -32,7 +32,7 @@ uBlock files have `twitch-videoad.js text/javascript` as line 1 (not valid JS �
 
 ## Versions
 
-Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.5.11/95, video-swap-new 1.87/55, strip 1.10/27. Testing: vaft 678.0.2/680, video-swap-new -/621.
+Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.5.12/96, video-swap-new 1.87/55, strip 1.10/27. Testing: vaft 678.0.2/680, video-swap-new -/621.
 
 ## localStorage Config
 
@@ -71,11 +71,12 @@ All read at init, injected into worker blob:
 - **Drift correction** — `startDriftCorrection(videoElement)` shared function. 1.1× playback rate, 30s safety timeout. Restarts fresh on re-entry (clears stale timers). Used by post-reload drift and buffer gap seek.
 - **Reload routing** — worker → main `ReloadPlayer` messages carry a `kind` field. `doTwitchPlayerTask(isPausePlay, isReload, reloadKind)` picks `setSrc` params: `kind === 'early'` → hard reload (`isNewMediaPlayerInstance: true, refreshAccessToken: true`, new session); otherwise soft reload. The two flags are **not** coupled: on Apple touch devices `iosSoftReload` downgrades `isNewMediaPlayerInstance` to false while `refreshAccessToken` stays true (v68.5.5 — not yet validated on a device). Early reload sites (both sticky + normal paths) send `kind: 'early'`; post-ad reload sites send `'post-ad'` when `SoftReloadNoStrip` is on and the break stripped nothing (v68.5.0), `'early'` otherwise. HEVC force reload stays soft (codec change, no strip involved). Hard reload flushes the MediaSource buffer — required after strip activity (BLANK_MP4 injection, recovery replay) to avoid audio/video desync from accumulated timestamp drift.
 - **Early reload** — fires during prolonged all-stripped freeze. Threshold: 3 polls (~6s), or 1 poll when recovery cache <3 segments (thin-cache fast path). Budget: `max(1, PodLength)` or `max(2, PodLength)` when thin. `EarlyReloadTriggered` resets on "still ads" (both sticky + normal paths) to allow budget-based re-fire. Override via `twitchAdSolutions_earlyReloadPollThreshold`.
+- **Preroll backup warm-up** — on the first poll of a non-midroll break (page load / channel switch) `processM3U8` starts `probeBackupPlayerType()` (token → usher → media m3u8) for every cold candidate type concurrently, stored in `streamInfo.BackupProbePrefetch`; the sequential probe loop then awaits them in its normal order, so commit/fallback semantics are unchanged but the ~2s serial black screen collapses to one round-trip. Leftovers are dropped after the loop. Midroll and later polls stay sequential (pinned type is warm there).
 - **Sticky CSAI fast path** — once a break enters CSAI fast path (all segments live), stays on it for the whole break. Has its own early-reload trigger + `EarlyReloadAwaitingResult` check (normal-path check unreachable due to early return).
 - **Latency-aware reload health check** — measures `seekable.end - currentTime` before skipping post-ad reload. If >7s behind live or seekable unavailable/garbage, proceeds with reload. Guards against 2^30 sentinel values via `Number.isFinite` + 3600s cap.
 - **User pause intent** — tracks video pause/play events to distinguish user vs script pauses. `weJustPaused` only resets when player wasn't paused (guards against clearing intent during stall recovery).
 - **Stale player ref** — `playerForMonitoringBuffering = null` on reload to force re-acquisition.
-- **StreamInfo factory** — `createStreamInfo()` declares all fields up-front (46 fields vaft, 31 fields video-swap-new). Serialized into worker blob.
+- **StreamInfo factory** — `createStreamInfo()` declares all fields up-front (52 fields vaft, 31 fields video-swap-new). Serialized into worker blob.
 
 ## Debug Logging
 
@@ -112,14 +113,16 @@ Disable with `twitchAdSolutions_autoUnmute='false'`.
 
 ## Ad Overlay Hiding
 
-`hideTwitchAdOverlays()` hides one overlay type during ad blocking:
+`hideTwitchAdOverlays()` hides these during ad blocking:
 - **Stream display ads (SDA)** — via exact selectors on the ad's own nodes, no parent walking: `[data-test-selector="sda-wrapper"]` plus the layout container (`[data-test-selector="sda-container"]`, `[data-a-target="sda-container"]`). Both carry the 90px reserved height, so both are hidden (v68.5.10).
 - **SDA lower-third black bar** — hiding the SDA nodes is only half the fix. Twitch *independently* shrinks the video to make room for the banner: it sets an inline percentage height (observed `calc(79.0698% + 0px)`) on `[data-a-target="video-ref"]` and adds a `...--stream-display-ad_lower-third` class. With the ad hidden, that reserved strip is empty player background — the **black bar across the lower third**. Fixed by forcing that element to `height: 100%` while Twitch's percentage shrink is present, re-asserted every tick (React re-applies it), and released when Twitch clears its own inline height. Matched on the stable `data-a-target` only — the `Layout-sc-*` classes on these nodes are styled-components output and must never be matched (v68.5.11).
 
 Called on every buffer monitor tick, from session start and regardless of ad state — it is deliberately NOT gated on `cachedPlayerRootDiv` (that cache is only populated by `updateAdblockBanner()` during an ad break, which previously left the SDA hide dead until the first break). Guards via `dataset.tasHidden` to skip already-hidden elements.
 
+- **Separate video ads (#249)** — `<video>` whose src host is `media-amazon.com` (the live player is always `blob:`, so this cannot false-positive) is hidden + muted + **fast-forwarded** (`playbackRate` 16, stepping down to 8/4 if the browser throws; `play()` if paused). It is NOT paused: a paused ad never fires `ended`, so Twitch's ad UI sat on "Play ad · 0:15" until its own timeout and the black slot stayed for the whole break — at 16x a 15s creative ends in ~1s and Twitch collapses the slot itself. Note the ad SDK therefore reports a completed view for every ad (deliberate trade-off, chosen over the stuck slot). Two extra hides ride on it: the video's **parent** (the slot's inline `background-color: black` wrapper) when its only other children are `hidden` label spans — this is the single sanctioned one-level parent step, anchored on the ad element and verified by inline style + child composition, never class names; and `.outstream-controls` (Twitch's hand-written class for the slot's Play-ad / Unmute-ad bar), hidden only while an ad video is present. All three restore themselves (recycled node no longer an ad → `playbackRate` back to 1; backdrop without a hidden ad video inside; controls when no ad video is on the page). The "Ad 1/2 · 0:15" pill has no stable attribute and is left alone — it goes away with the slot (v68.5.12).
+
 **Previously removed:**
 - Turbo promo / "allow ads" overlay hide (PR #143) — used `.player-overlay-background` which is Twitch's generic modal scrim (also used for content gates, error dialogs, subscription warnings). Too broad to use safely.
 - Ad-break-card text match (PR #141) — scanned `span/p/h1/h2/h3` text for "taking an ad break" phrases then walked up via fuzzy `[class*="overlay"]` + `parentElement` fallback. Could hide player controls on false matches. TTV-AB doesn't attempt this either.
 
-Only keep overlay hides that use exact attribute selectors with no parent walking.
+Only keep overlay hides that use exact attribute selectors with no parent walking — the one exception is the verified one-level parent step in the separate-video-ad guard above.

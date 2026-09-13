@@ -1,5 +1,9 @@
 ## Unreleased
 
+### Changed
+- **Preroll backup probe runs in parallel** — on a page load / channel switch every backup player type is cold, and the probe loop tried them one at a time (token → usher → media m3u8, ~0.4–0.5s each) while the player had nothing to show; with the usual 4 ad-laden Source types + autoplay that was ~2s of black before the first frame. `processM3U8` now starts `probeBackupPlayerType()` for every cold candidate at once on the first poll of a non-midroll break and the loop awaits them in its normal order — commit / fallback / last-resort semantics are unchanged, the round-trips just overlap (one round-trip instead of five). Midroll and later polls stay sequential (the pinned type is warm there). Side effect: a token response without `streamPlaybackAccessToken` is no longer retried within the same poll. Log: `backup found in Xms (cold cache: N token fetches, N in parallel)`. vaft only
+- **Separate video ads are fast-forwarded instead of paused, and their slot is hidden** — the #249 guard paused the `media-amazon.com` ad `<video>`, but a paused ad never fires `ended`, so Twitch's ad UI sat on "Play ad · 0:15" until its own timeout and the black ad slot stayed up for the whole break. The element is now hidden + muted + played at 16x (stepping down to 8/4 where the browser caps lower; `play()` if paused), so a 15s creative is over in ~1s and Twitch advances the pod and collapses the slot itself. The slot's inline `background:black` backdrop (the video's parent, verified by inline style + child composition — the one sanctioned parent step) and its `.outstream-controls` bar are hidden meanwhile; all of it restores itself when the node is recycled or the ad is gone. Trade-off: the ad SDK reports a completed view for every ad. vaft only (#249)
+
 ## v68.5.9 (2026-09-08) — RoxyCoding fork
 
 ### Added
