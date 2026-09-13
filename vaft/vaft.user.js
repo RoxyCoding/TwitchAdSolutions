@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/RoxyCoding/TwitchAdSolutions
-// @version      68.5.12
+// @version      68.5.13
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/RoxyCoding/TwitchAdSolutions/raw/main/vaft/vaft.user.js
 // @downloadURL  https://github.com/RoxyCoding/TwitchAdSolutions/raw/main/vaft/vaft.user.js
