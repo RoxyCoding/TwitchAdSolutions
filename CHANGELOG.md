@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v68.5.14 (2026-09-15) — RoxyCoding fork
+
+### Fixed
+- **Squeezeback stream display ads left a black column down the right side, and the banner could paint before the first tick** — a second SDA layout was observed in the wild: `stream-display-ad__wrapper_squeezeback`, a tall vertical creative (276×1050, scaled) down the right edge of the player. Twitch makes room for it by shrinking the video on *both* axes — `height: calc(85.1206% + 0px)` **and** `width: calc(85.2143%)` on `[data-a-target="video-ref"]`, plus a `video-player--stream-display-ad_squeezeback` class — where the lower-third variant only shrank the height. The v68.5.11 reclaim only ever reset `height`, so with the ad hidden the video still sat in the top-left 85% of the player with an empty black column beside it. The tick guard now checks each axis on its own and forces `width: 100%` alongside `height: 100%` whenever Twitch's inline percentage shrink is present, releasing both when Twitch clears them. On top of that, the document-start stylesheet from v68.5.13 gains two rules so the SDA never paints while waiting for a buffer-monitor tick (600ms, up to ~9s on a hidden tab): the wrapper / container hide on the same exact data attributes the tick guard uses, and an un-squeeze keyed on Twitch's hand-written `video-player--stream-display-ad_lower-third` / `_squeezeback` state classes anchored on the exact `data-a-target` (BEM-style names like `.outstream-controls`, not the generated `Layout-sc-*` hashes, which remain off-limits). `!important` in an author sheet beats the non-important inline value React writes; the tick guard's inline override stays as the fallback. Log line is now `Expanded video to fill the SDA-reserved space (was height …, width …)`. Applies to all four vaft variants.
+
 ## v68.5.13 (2026-09-13) — RoxyCoding fork
 
 ### Changed

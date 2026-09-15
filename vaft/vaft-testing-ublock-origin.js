@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 681;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 682;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft-testing v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft-testing v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -2553,35 +2553,48 @@ twitch-videoad.js text/javascript
                 }
             }
         }
-        // Reclaim the lower third the SDA reserved. Hiding the sda-wrapper/-container above
-        // removes the ad itself, but Twitch independently SHRINKS the video to make room for
-        // it: it sets an inline height (observed: 'calc(79.0698% + 0px)') on the video's own
-        // wrapper and adds the ...--stream-display-ad_lower-third class. With the ad hidden,
-        // that reserved strip is just empty player background — the black bar across the
-        // bottom third users see while an SDA break runs.
+        // Reclaim the space the SDA reserved. Hiding the sda-wrapper/-container above removes
+        // the ad itself, but Twitch independently SHRINKS the video to make room for it, with
+        // inline percentage sizes on the video's own wrapper. Two variants observed:
+        //   lower-third: height only ('calc(79.0698% + 0px)') + ...--stream-display-ad_lower-third
+        //   squeezeback: height AND width ('calc(85.1206% + 0px)' / 'calc(85.2143%)') +
+        //                ...--stream-display-ad_squeezeback — a vertical banner down the right
+        //                edge, so the video is pushed into the top-left 85% of the player.
+        // With the ad hidden, the reserved strip(s) are just empty player background — the
+        // black bar across the bottom (and, for squeezeback, the black column down the right
+        // side) users see while an SDA break runs. Height-only handling left that column.
         // Matched on data-a-target="video-ref" — a stable exact attribute on the element that
-        // carries the inline height, so no parent walking and no generated class names (the
+        // carries the inline sizes, so no parent walking and no generated class names (the
         // 'Layout-sc-*' classes here are styled-components output and must not be matched).
-        // Only an inline height Twitch itself set is cleared, and only while it is a
-        // percentage shrink: the normal player leaves this height unset, so a session that
-        // never sees an SDA is never touched.
+        // Only an inline size Twitch itself set is cleared, and only while it is a percentage
+        // shrink: the normal player leaves both unset, so a session that never sees an SDA is
+        // never touched. Each axis is checked on its own so lower-third (no width) still works.
         const videoRefs = document.querySelectorAll('[data-a-target="video-ref"]');
         for (let i = 0; i < videoRefs.length; i++) {
             const ref = videoRefs[i];
             const inlineHeight = ref.style.height || '';
+            const inlineWidth = ref.style.width || '';
+            const heightShrunk = inlineHeight.indexOf('%') !== -1 && inlineHeight !== '100%';
+            const widthShrunk = inlineWidth.indexOf('%') !== -1 && inlineWidth !== '100%';
             // Re-assert every tick: React re-renders the shrink back on, so a one-shot clear
             // would let the black bar return mid-break.
-            if (inlineHeight && inlineHeight.indexOf('%') !== -1 && inlineHeight !== '100%') {
-                ref.style.setProperty('height', '100%', 'important');
+            if (heightShrunk || widthShrunk) {
+                if (heightShrunk) {
+                    ref.style.setProperty('height', '100%', 'important');
+                }
+                if (widthShrunk) {
+                    ref.style.setProperty('width', '100%', 'important');
+                }
                 if (!ref.dataset.tasVideoExpanded) {
                     ref.dataset.tasVideoExpanded = '1';
-                    console.log('[AD DEBUG] Expanded video to fill the SDA-reserved lower third (was ' + inlineHeight + ')');
+                    console.log('[AD DEBUG] Expanded video to fill the SDA-reserved space (was height ' + (inlineHeight || 'unset') + ', width ' + (inlineWidth || 'unset') + ')');
                 }
-            } else if (ref.dataset.tasVideoExpanded && !inlineHeight) {
+            } else if (ref.dataset.tasVideoExpanded && !inlineHeight && !inlineWidth) {
                 // Twitch dropped its own shrink (break over) — stop overriding so the player
                 // returns to whatever layout Twitch wants next.
                 delete ref.dataset.tasVideoExpanded;
                 ref.style.removeProperty('height');
+                ref.style.removeProperty('width');
             }
         }
         // Separate video-ad guard (mirrors GosuDRM/TTV-AB v12.0.1-12.0.8 — issue #249): since
@@ -3366,23 +3379,35 @@ twitch-videoad.js text/javascript
             (document.head || document.documentElement).appendChild(style);
         }
     } catch {}
-    // Separate video-ad slot (#249), hidden before first paint. The buffer-monitor guard also hides
-    // it, but only on its next tick (600ms) — long enough for the black box to paint once. A
-    // stylesheet installed here at document-start closes that gap. Three independent rules so an
-    // unsupported selector (:has needs Chrome 105 / Firefox 121 / Safari 15.4) drops only itself:
+    // Separate video-ad slot (#249) and stream display ads (SDA), hidden before first paint. The
+    // buffer-monitor guard also hides both, but only on its next tick (600ms; up to ~9s on a
+    // hidden tab) — long enough for the black box / banner to paint. A stylesheet installed here
+    // at document-start closes that gap. Independent rules so an unsupported selector (:has needs
+    // Chrome 105 / Firefox 121 / Safari 15.4) drops only itself:
     //   1. the ad <video>, by the ad-CDN host in its src — the live player is always blob:
     //   2. the slot's control bar (Twitch's hand-written class, not a generated one)
     //   3. the collapsible slot container: an inline `transition: max-height` div that CONTAINS the
     //      control bar or the ad video. Both halves are required, so neither the main player (not
     //      inside such a container) nor an unrelated collapsible panel (no ad inside) can match.
+    //   4. the SDA wrapper and its layout container — the same exact data attributes the tick
+    //      guard uses, so the banner (lower-third strip or squeezeback column) never paints.
+    //   5. the video wrapper while Twitch has it squeezed for an SDA. Keyed on Twitch's
+    //      hand-written state classes (`video-player--stream-display-ad_lower-third` /
+    //      `_squeezeback` — BEM-style like `.outstream-controls`, NOT the generated `Layout-sc-*`
+    //      hashes), anchored on the exact data-a-target. `!important` in an author sheet beats the
+    //      non-important inline `calc(NN%)` React writes, so the black bar / column never paints
+    //      either; the tick guard's inline override stays as the fallback if a class is renamed.
     // Restore is implicit: every rule keys off something only the ad has, so a recycled node stops
-    // matching the moment its src changes. The JS guard keeps the mute / fast-forward / re-assert.
+    // matching the moment its src / class changes. The JS guard keeps the mute / fast-forward /
+    // re-assert.
     try {
         const adSlotStyle = document.createElement('style');
         adSlotStyle.textContent = [
             'video[src*="media-amazon.com/"] { display: none !important; }',
             '.outstream-controls { display: none !important; }',
-            'div[style*="transition: max-height"]:has(.outstream-controls, video[src*="media-amazon.com/"]) { display: none !important; }'
+            'div[style*="transition: max-height"]:has(.outstream-controls, video[src*="media-amazon.com/"]) { display: none !important; }',
+            '[data-test-selector="sda-wrapper"], [data-test-selector="sda-container"], [data-a-target="sda-container"] { display: none !important; }',
+            '[data-a-target="video-ref"].video-player--stream-display-ad_lower-third, [data-a-target="video-ref"].video-player--stream-display-ad_squeezeback { height: 100% !important; width: 100% !important; }'
         ].join(' ');
         (document.head || document.documentElement).appendChild(adSlotStyle);
     } catch {}
