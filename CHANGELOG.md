@@ -1,5 +1,14 @@
 ## Unreleased
 
+## v68.5.15 (2026-11-27) — RoxyCoding fork
+
+### Fixed
+
+- **Playlist requests could hang after an error.** In vaft 68.5.15 and video-swap-new 1.88, failures while fetching, reading, or processing a playlist now reject the player's request so it can handle the error.
+- **Some quality variants skipped playlist processing.** Both scripts now recognize registered variant URLs with query strings or without a `.m3u8` extension. Cache checks use a variant parsed from the master playlist. If no usable variant was cached, the scripts read a fresh master playlist. video-swap-new also uses the original stream's registered variant when checking whether playback can return from a backup.
+
+These fixes cover all seven vaft and video-swap-new userscript and uBlock Origin builds, including testing versions.
+
 ## v68.5.14 (2026-09-15) — RoxyCoding fork
 
 ### Fixed
