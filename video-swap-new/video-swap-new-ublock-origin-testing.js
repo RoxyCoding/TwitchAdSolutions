@@ -13,7 +13,7 @@ twitch-videoad.js text/javascript
             return;
         }
     }
-    const ourTwitchAdSolutionsVersion = 621;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 622;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions video-swap-new-testing v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: video-swap-new-testing v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -89,6 +89,7 @@ twitch-videoad.js text/javascript
             UsherParams: usherParams,
             // Resolutions / URL map
             Urls: new Map(),
+            NativeVariantUrl: null,
             RequestedAds: new Set(),
             // Encoding state
             Encodings: null,
@@ -408,7 +409,7 @@ twitch-videoad.js text/javascript
                     const resolutionInfo = {
                         Resolution: resolution,
                         FrameRate: attributes['FRAME-RATE'],
-                        Url: lines[i + 1]
+                        Url: nextLine
                     };
                     streamInfo.Urls.set(lines[i + 1].trimEnd(), resolutionInfo);
                 }
@@ -773,8 +774,8 @@ twitch-videoad.js text/javascript
             streamInfo.LastCleanNativeM3U8 = textStr;
             streamInfo.LastCleanNativePlaylistAt = Date.now();
         }
-        if (streamInfo.BackupEncodings) {
-            const streamM3u8Url = streamInfo.Encodings.match(/^https:.*\.m3u8$/m)?.[0];
+        if (streamInfo.BackupEncodings && streamInfo.NativeVariantUrl) {
+            const streamM3u8Url = streamInfo.NativeVariantUrl;
             const streamM3u8Response = await realFetch(streamM3u8Url);
             if (streamM3u8Response.status == 200) {
                 const streamM3u8 = await streamM3u8Response.text();
@@ -890,28 +891,11 @@ twitch-videoad.js text/javascript
                     });
                 }
                 url = url.trimEnd();
-                if (url.endsWith('m3u8')) {
-                    return new Promise(function(resolve, reject) {
-                        const processAfter = async function(response) {
-                            if (response.status === 200) {
-                                const str = await processM3U8(url, await response.text(), realFetch);
-                                resolve(new Response(str, {
-                                    status: response.status,
-                                    statusText: response.statusText,
-                                    headers: response.headers
-                                }));
-                            } else {
-                                resolve(response);
-                            }
-                        };
-                        realFetch(url, options).then(function(response) {
-                            processAfter(response);
-                        })['catch'](function(err) {
-                            const errMsg = String(err?.message || err);
-                            if (err?.name !== 'AbortError' && !/cancel|abort/i.test(errMsg)) console.log('fetch hook err ' + err);
-                            reject(err);
-                        });
-                    });
+                if (Object.hasOwn(StreamInfosByUrl, url) || url.endsWith('m3u8')) {
+                    const response = await realFetch(url, options);
+                    if (response.status !== 200) return response;
+                    const playlist = await processM3U8(url, await response.text(), realFetch);
+                    return new Response(playlist, response);
                 }
                 else if (url.includes('/channel/hls/') && !url.includes('picture-by-picture')) {
                     V2API = url.includes('/api/v2/');
@@ -922,48 +906,46 @@ twitch-videoad.js text/javascript
                         tempUrl.searchParams.delete('parent_domains');
                         url = tempUrl.toString();
                     }
-                    return new Promise(async function(resolve, reject) {
-                        // - First m3u8 request is the m3u8 with the video encodings (360p,480p,720p,etc).
-                        // - Second m3u8 request is the m3u8 for the given encoding obtained in the first request. At this point we will know if there's ads.
-                        let streamInfo = StreamInfos[channelName];
-                        if (streamInfo != null && streamInfo.Encodings != null && (await realFetch(streamInfo.Encodings.match(/^https:.*\.m3u8$/m)?.[0])).status !== 200) {
-                            // The cached encodings are dead (the stream probably restarted)
-                            streamInfo = null;
-                        }
-                        let serverTime = null;
-                        if (streamInfo == null || streamInfo.Encodings == null) {
-                            StreamInfos[channelName] = streamInfo = createStreamInfo(channelName, (new URL(url)).search);
-                            const encodingsM3u8Response = await realFetch(url, options);
-                            if (encodingsM3u8Response != null && encodingsM3u8Response.status === 200) {
-                                const encodingsM3u8 = await encodingsM3u8Response.text();
-                                streamInfo.Encodings = encodingsM3u8;
-                                setStreamInfoUrls(streamInfo, encodingsM3u8);
-                                serverTime = getServerTimeFromM3u8(encodingsM3u8);
-                                const resolutionInfo = streamInfo.Urls.values().next().value;
-                                const streamM3u8Response = await realFetch(resolutionInfo.Url);
-                                if (streamM3u8Response.status == 200) {
-                                    const streamM3u8 = await streamM3u8Response.text();
-                                    if (hasAdTags(streamM3u8) || SimulatedAdsDepth > 0) {
-                                        await onFoundAd(streamInfo, streamM3u8, false, realFetch, resolutionInfo.Url, resolutionInfo);
-                                    }
-                                } else {
-                                    resolve(streamM3u8Response);
-                                    return;
+                    // - First m3u8 request is the m3u8 with the video encodings (360p,480p,720p,etc).
+                    // - Second m3u8 request is the m3u8 for the given encoding obtained in the first request. At this point we will know if there's ads.
+                    let streamInfo = StreamInfos[channelName];
+                    if (streamInfo?.Encodings && (!streamInfo.NativeVariantUrl || (await realFetch(streamInfo.NativeVariantUrl)).status !== 200)) {
+                        // The cached encodings are dead (the stream probably restarted)
+                        streamInfo = null;
+                    }
+                    let serverTime = null;
+                    if (streamInfo == null || streamInfo.Encodings == null) {
+                        StreamInfos[channelName] = streamInfo = createStreamInfo(channelName, (new URL(url)).search);
+                        const encodingsM3u8Response = await realFetch(url, options);
+                        if (encodingsM3u8Response != null && encodingsM3u8Response.status === 200) {
+                            const encodingsM3u8 = await encodingsM3u8Response.text();
+                            streamInfo.Encodings = encodingsM3u8;
+                            setStreamInfoUrls(streamInfo, encodingsM3u8);
+                            serverTime = getServerTimeFromM3u8(encodingsM3u8);
+                            const resolutionInfo = streamInfo.Urls.values().next().value;
+                            if (!resolutionInfo) return new Response(encodingsM3u8, encodingsM3u8Response);
+                            streamInfo.NativeVariantUrl = resolutionInfo.Url;
+                            const streamM3u8Response = await realFetch(resolutionInfo.Url);
+                            if (streamM3u8Response.status == 200) {
+                                const streamM3u8 = await streamM3u8Response.text();
+                                if (hasAdTags(streamM3u8) || SimulatedAdsDepth > 0) {
+                                    await onFoundAd(streamInfo, streamM3u8, false, realFetch, resolutionInfo.Url, resolutionInfo);
                                 }
                             } else {
-                                resolve(encodingsM3u8Response);
-                                return;
+                                return streamM3u8Response;
                             }
+                        } else {
+                            return encodingsM3u8Response;
                         }
-                        if (!serverTime) {
-                            const encodingsM3u8Response = await realFetch(url, options);
-                            if (encodingsM3u8Response != null && encodingsM3u8Response.status === 200) {
-                                serverTime = getServerTimeFromM3u8(await encodingsM3u8Response.text());
-                            }
+                    }
+                    if (!serverTime) {
+                        const encodingsM3u8Response = await realFetch(url, options);
+                        if (encodingsM3u8Response != null && encodingsM3u8Response.status === 200) {
+                            serverTime = getServerTimeFromM3u8(await encodingsM3u8Response.text());
                         }
-                        streamInfo.IsMovingOffBackupEncodings = false;
-                        resolve(new Response(replaceServerTimeInM3u8(streamInfo.BackupEncodings ? streamInfo.BackupEncodings : streamInfo.Encodings, serverTime)));
-                    });
+                    }
+                    streamInfo.IsMovingOffBackupEncodings = false;
+                    return new Response(replaceServerTimeInM3u8(streamInfo.BackupEncodings ? streamInfo.BackupEncodings : streamInfo.Encodings, serverTime));
                 }
             }
             return realFetch.apply(this, arguments);
